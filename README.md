@@ -3,7 +3,7 @@
 An interactive waveform plot: pan, zoom and pick your way around many
 high-density polylines at once.
 
-This is a Rust port of the JavaFX application in [`../squiggle-java`](../squiggle-java),
+This is a Rust port of the JavaFX application at [`heidtmare/squiggle`](https://github.com/heidtmare/squiggle),
 rebuilt on [Bevy](https://bevy.org). The original drew everything onto a
 JavaFX `Canvas` from a 30 fps animation timer, projecting every coordinate on
 the CPU each frame. Here the points are uploaded to the GPU once and the
