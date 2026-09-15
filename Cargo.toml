@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["squiggle-core", "squiggle-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/teamninjaneer/squiggle"
+
+[workspace.dependencies]
+bevy = "0.19.1"
+bevy_egui = "0.42.0"
+squiggle-core = { path = "squiggle-core" }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

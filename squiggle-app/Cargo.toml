@@ -1,0 +1,12 @@
+[package]
+name = "squiggle-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bevy application shell for the Squiggle waveform plot."
+
+[dependencies]
+squiggle-core.workspace = true
+bevy.workspace = true
+bevy_egui.workspace = true
+rand = "0.9"

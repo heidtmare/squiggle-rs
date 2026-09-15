@@ -1,0 +1,8 @@
+[package]
+name = "squiggle-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Plot model, coordinate math and axis tick generation for Squiggle. No rendering dependencies."
+
+[dependencies]
