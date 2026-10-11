@@ -46,6 +46,7 @@ impl WaveformReader for WavReader {
                 sample_rate: Some(f64::from(spec.sample_rate)),
                 samples: SampleBuf::Real(interleaved.iter().skip(channel).step_by(channels).copied().collect()),
                 suggestion: None,
+                location: None,
             })
             .collect())
     }

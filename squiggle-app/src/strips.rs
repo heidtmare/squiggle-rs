@@ -130,7 +130,7 @@ fn build(series: &Series, key: StripKey, complex: bool) -> StripImage {
 }
 
 /// Inferno-like ramp, `t` in `0..=1`.
-fn colormap(t: f32) -> [u8; 4] {
+pub(crate) fn colormap(t: f32) -> [u8; 4] {
     const STOPS: [[f32; 3]; 6] = [
         [0.0, 0.0, 4.0],
         [40.0, 11.0, 84.0],

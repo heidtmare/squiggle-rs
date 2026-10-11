@@ -12,7 +12,7 @@ use squiggle_core::{Point, Rgba, Squiggle, Style};
 
 use crate::plot::AddSquiggle;
 use crate::showcase::{self, LoadScene, Scene, Showcase};
-use crate::workspace::WorkspaceRequest;
+use crate::workspace::{SyntheticEvent, WorkspaceRequest};
 
 /// Samples per squiggle, as the Java toolbar used.
 pub const DEFAULT_SAMPLE_COUNT: usize = 1000;
@@ -35,8 +35,8 @@ pub struct DemoOptions {
     pub project: Option<std::path::PathBuf>,
     /// Waveform files to import at startup.
     pub import: Vec<std::path::PathBuf>,
-    /// Start with the synthetic alignment event.
-    pub synthetic: bool,
+    /// Start with a synthetic event.
+    pub synthetic: Option<SyntheticEvent>,
 }
 
 impl Default for DemoOptions {
@@ -48,19 +48,21 @@ impl Default for DemoOptions {
             screenshot: None,
             project: None,
             import: Vec::new(),
-            synthetic: false,
+            synthetic: None,
         }
     }
 }
 
 pub const USAGE: &str = "\
-Usage: squiggle-app [--project FILE | --synthetic] [--squiggles N] [--samples N]
+Usage: squiggle-app [--project FILE | --synthetic | --located] [--squiggles N] [--samples N]
                     [--demo SCENE] [--screenshot FILE] [WAVEFORM...]
 
   WAVEFORM...        import these files at startup (miniSEED, SAC, SigMF,
                      WAV, CSV; anything else as raw binary)
   --project FILE     open a .squiggle project
   --synthetic        start with a synthetic event of known delays (alignment demo)
+  --located          start with a synthetic EMP, seismic and infrasound event of
+                     known source (picking and location demo)
   --squiggles N      put N squiggles on the plot at startup (default 0)
   --samples N        samples per generated squiggle (default 1000)
   --demo SCENE       open a transform demo: fourier or wavelet
@@ -102,7 +104,8 @@ impl DemoOptions {
                     let path = args.next().ok_or_else(|| format!("{argument} needs a file"))?;
                     options.project = Some(path.into());
                 }
-                "--synthetic" => options.synthetic = true,
+                "--synthetic" => options.synthetic = Some(SyntheticEvent::Alignment),
+                "--located" => options.synthetic = Some(SyntheticEvent::Located),
                 "--help" | "-h" => return Err(USAGE.to_string()),
                 other if other.starts_with('-') => {
                     return Err(format!("unrecognised argument: {other}\n\n{USAGE}"));
@@ -125,8 +128,8 @@ pub fn seed(
     if let Some(path) = &options.project {
         workspace.write(WorkspaceRequest::Open(path.clone()));
     }
-    if options.synthetic {
-        workspace.write(WorkspaceRequest::Synthetic);
+    if let Some(event) = options.synthetic {
+        workspace.write(WorkspaceRequest::Synthetic(event));
     }
     if !options.import.is_empty() {
         workspace.write(WorkspaceRequest::Import(options.import.clone()));
@@ -238,7 +241,8 @@ mod tests {
 
     #[test]
     fn the_synthetic_event_can_be_asked_for() {
-        assert!(parse(&["--synthetic"]).unwrap().synthetic);
+        assert_eq!(parse(&["--synthetic"]).unwrap().synthetic, Some(SyntheticEvent::Alignment));
+        assert_eq!(parse(&["--located"]).unwrap().synthetic, Some(SyntheticEvent::Located));
     }
 
     #[test]

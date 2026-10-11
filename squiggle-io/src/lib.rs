@@ -17,7 +17,7 @@ mod wav;
 use core::fmt;
 use std::path::{Path, PathBuf};
 
-use squiggle_core::{RawLayout, SampleBuf, Suggestion, Timestamp, TraceSamples, TraceSource};
+use squiggle_core::{Location, RawLayout, SampleBuf, Suggestion, Timestamp, TraceSamples, TraceSource};
 
 pub use crate::csv::CsvReader;
 pub use crate::mseed::MseedReader;
@@ -43,6 +43,8 @@ pub struct Recording {
     pub sample_rate: Option<f64>,
     pub samples: SampleBuf,
     pub suggestion: Option<Suggestion>,
+    /// Sensor position from the file's metadata.
+    pub location: Option<Location>,
 }
 
 /// A decoded file.

@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 
-use squiggle_core::{SampleBuf, SampleKind, Suggestion, Timestamp, TraceSamples};
+use squiggle_core::{Location, SampleBuf, SampleKind, Suggestion, Timestamp, TraceSamples};
 
 use crate::{ReadError, Recording};
 
@@ -18,6 +18,7 @@ pub struct Header {
     pub sample_rate: Option<f64>,
     pub kind: SampleKind,
     pub suggestion: Option<Suggestion>,
+    pub location: Option<Location>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -58,6 +59,7 @@ impl FileSource {
                 sample_rate: recording.sample_rate,
                 kind: recording.samples.kind(),
                 suggestion: recording.suggestion,
+                location: recording.location,
             }));
             let pieces: Vec<SampleBuf> = match recording.samples {
                 SampleBuf::Real(s) => s.chunks(chunk_len).map(|c| SampleBuf::Real(c.to_vec())).collect(),
@@ -119,6 +121,7 @@ mod tests {
             sample_rate: Some(10.0),
             samples,
             suggestion: None,
+            location: None,
         }
     }
 
@@ -157,6 +160,7 @@ mod tests {
             sample_rate: None,
             kind: SampleKind::Real,
             suggestion: None,
+            location: None,
         };
         let mut source = Scripted(VecDeque::from([
             SourceEvent::Header(header),

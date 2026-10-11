@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use squiggle_core::{NumberFormat, PhenomenologyId, Suggestion, Timestamp};
+use squiggle_core::{Location, NumberFormat, PhenomenologyId, Suggestion, Timestamp};
 
 use crate::decode::{deinterleave, full_scale, values};
 use crate::{ReadError, Recording, WaveformReader};
@@ -38,6 +38,14 @@ impl WaveformReader for SigmfReader {
         let (complex, format, big_endian) = parse_datatype(datatype).ok_or_else(|| error(format!("unsupported datatype {datatype}")))?;
         let channels = global["core:num_channels"].as_u64().unwrap_or(1).max(1) as usize;
         let sample_rate = global["core:sample_rate"].as_f64().filter(|r| *r > 0.0);
+        // GeoJSON point: [longitude, latitude, altitude?].
+        let point = &global["core:geolocation"]["coordinates"];
+        let location = match (point[0].as_f64(), point[1].as_f64()) {
+            (Some(longitude), Some(latitude)) => {
+                Some(Location { latitude, longitude, elevation_m: point[2].as_f64().unwrap_or(0.0) }).filter(Location::is_valid)
+            }
+            _ => None,
+        };
         let start = meta["captures"][0]["core:datetime"]
             .as_str()
             .map(|t| t.parse::<Timestamp>().map_err(|e| error(e.to_string())))
@@ -58,6 +66,7 @@ impl WaveformReader for SigmfReader {
                 sample_rate,
                 samples,
                 suggestion: Some(Suggestion { phenomenology: PhenomenologyId::new("rf"), reason: "SigMF recording".into() }),
+                location,
             })
             .collect())
     }
@@ -110,7 +119,8 @@ mod tests {
         let meta = dir.path().join("rx.sigmf-meta");
         std::fs::write(
             &meta,
-            r#"{"global":{"core:datatype":"ci16_le","core:sample_rate":1e6,"core:version":"1.0.0"},
+            r#"{"global":{"core:datatype":"ci16_le","core:sample_rate":1e6,"core:version":"1.0.0",
+                "core:geolocation":{"type":"Point","coordinates":[-106.5,35.25,1650]}},
                 "captures":[{"core:sample_start":0,"core:datetime":"2026-10-11T00:00:00.000001Z"}],"annotations":[]}"#,
         )
         .unwrap();
@@ -123,5 +133,6 @@ mod tests {
         assert_eq!(r.sample_rate, Some(1e6));
         assert_eq!(r.start.unwrap().to_string(), "2026-10-11T00:00:00.000001000Z");
         assert_eq!(r.suggestion.as_ref().unwrap().phenomenology.as_str(), "rf");
+        assert_eq!(r.location, Some(Location { latitude: 35.25, longitude: -106.5, elevation_m: 1650.0 }));
     }
 }

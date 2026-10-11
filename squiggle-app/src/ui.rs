@@ -19,9 +19,10 @@ use squiggle_core::{
 
 use crate::demo::{self, DemoOptions};
 use crate::plot::{AddSquiggle, FitToData, Plot, PlotCamera, PlotMode, RemoveSquiggle, SquiggleModel};
+use crate::locate_ui::{self, LocateWindows};
 use crate::process_ui::{self, ProcessWindows};
 use crate::project_ui::{self, ProjectAccess, ProjectWindows};
-use crate::workspace::WorkspaceRequest;
+use crate::workspace::{SyntheticEvent, WorkspaceRequest};
 use crate::showcase::{LoadScene, Scene, Showcase};
 use crate::tracks::{self, RowOrder, Track, TrackView};
 
@@ -41,10 +42,11 @@ impl Plugin for UiPlugin {
         app.init_resource::<Chrome>()
             .init_resource::<ProjectWindows>()
             .init_resource::<ProcessWindows>()
+            .init_resource::<LocateWindows>()
             .add_systems(Startup, setup)
             .add_systems(
                 EguiPrimaryContextPass,
-                (chrome, tracks::tracks_ui, project_ui::windows, process_ui::windows).chain(),
+                (chrome, tracks::tracks_ui, project_ui::windows, process_ui::windows, locate_ui::windows).chain(),
             );
     }
 }
@@ -67,6 +69,7 @@ pub struct TrackAccess<'w, 's> {
     view: ResMut<'w, TrackView>,
     tracks: Query<'w, 's, &'static mut Track>,
     process: ResMut<'w, ProcessWindows>,
+    locate: ResMut<'w, LocateWindows>,
 }
 
 /// Which parts of the chrome are open.
@@ -294,7 +297,10 @@ fn menu_bar(
         ui.menu_button("Project", |ui| project_ui::project_menu(ui, project));
         ui.menu_button("Process", |ui| {
             process_ui::process_menu(ui, &mut tracks.process, &mut tracks.view);
-            if tracks.process.processing_open || tracks.process.align_open {
+            ui.separator();
+            locate_ui::locate_menu(ui, &mut tracks.locate);
+            let locate = tracks.locate.pick_open || tracks.locate.locate_open;
+            if tracks.process.processing_open || tracks.process.align_open || locate {
                 *tracks.mode = PlotMode::Tracks;
             }
         });
@@ -308,7 +314,15 @@ fn menu_bar(
                 .on_hover_text("A new project: seven sensors recording one event with known delays")
                 .clicked()
             {
-                project.requests.write(WorkspaceRequest::Synthetic);
+                project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Alignment));
+                ui.close();
+            }
+            if ui
+                .button("Synthetic located event")
+                .on_hover_text("A new project: EMP, seismic and infrasound sensors at known positions recording one explosion")
+                .clicked()
+            {
+                project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Located));
                 ui.close();
             }
             ui.separator();
@@ -726,13 +740,15 @@ fn about_window(ctx: &egui::Context, chrome: &mut Chrome) {
             ui.strong("Tracks");
             ui.label("Scroll to zoom time, drag to pan time and rows, pinch or Control-scroll to scale amplitude.");
             ui.label("Click a row to select it; right-click for display, y scale, I/Q component, reference and offset lock. Double-click to fit.");
-            ui.label("Shift+drag a row to shift it in time (snaps to correlation peaks against the reference; Alt disables). Arrow keys nudge selected rows one sample, ten with Shift.");
+            ui.label("Shift+drag a row to shift it in time (snaps to moveout from the saved origin, to the reference's picks and to correlation peaks; Alt disables). Arrow keys nudge selected rows one sample, ten with Shift.");
+            ui.label("Over a row, P places a first-phase pick at the cursor, S an S pick; Delete removes the nearest pick.");
             ui.strong("Overlay");
             ui.label("Drag to pan. Scroll to zoom — hold Alt to keep the x scale, Control to keep the y scale.");
             ui.label("Click a squiggle to select it and show its samples.");
             ui.separator();
             ui.label("Process ▸ Filter and detrend preprocesses selected tracks; Process ▸ Align measures and applies delays.");
-            ui.label("Edits to processing and offsets undo with ⌘Z / Ctrl+Z and redo with ⇧⌘Z.");
+            ui.label("Process ▸ Pick finds onsets; Process ▸ Locate fits source position and origin time, and removes moveout.");
+            ui.label("Edits to processing, offsets, picks, sensor locations and the origin undo with ⌘Z / Ctrl+Z and redo with ⇧⌘Z.");
             ui.label("Transform turns the selected squiggles, or the visible part of selected tracks, into spectra or wavelet levels.");
         });
 }

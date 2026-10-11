@@ -7,8 +7,9 @@ use core::fmt;
 
 use crate::dsp::Processing;
 use crate::id::Id;
+use crate::locate::Origin;
 use crate::phenomenology::{self, Phenomenology, PhenomenologyId};
-use crate::sensor::{Alignment, Analyst, Assignment, ClockCorrection, Provenance, Sensor, Trace};
+use crate::sensor::{Alignment, Analyst, Assignment, ClockCorrection, Location, Pick, Provenance, Sensor, Trace};
 use crate::time::Timestamp;
 
 /// Project file format identifier.
@@ -38,7 +39,9 @@ pub enum Change {
     /// Recorded as manual, by the op's analyst.
     AssignPhenomenology { sensor: Id, phenomenology: PhenomenologyId },
     SetClockCorrection { sensor: Id, clock: ClockCorrection },
+    SetSensorLocation { sensor: Id, location: Option<Location> },
     AddTrace(Trace),
+    /// Also removes the trace's picks.
     RemoveTrace { trace: Id },
     /// Requires an assigned phenomenology and a filter valid at the trace's rate.
     SetProcessing { trace: Id, processing: Processing },
@@ -50,6 +53,17 @@ pub enum Change {
         #[cfg_attr(feature = "serde", serde(default))]
         revert: bool,
     },
+    /// Adds a pick, replacing any with its id or its trace and phase. An
+    /// automatic pick needs an assigned phenomenology and never replaces a
+    /// manual one unless `revert`.
+    SetPick {
+        pick: Pick,
+        #[cfg_attr(feature = "serde", serde(default))]
+        revert: bool,
+    },
+    RemovePick { pick: Id },
+    /// The project's located source; per event once events exist.
+    SetOrigin { origin: Option<Origin> },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -67,6 +81,11 @@ pub enum ApplyError {
     Unassigned(Id),
     InvalidProcessing(String),
     Locked(Id),
+    InvalidLocation,
+    UnknownPick(Id),
+    InvalidPick(String),
+    /// An automatic pick would replace this manual one.
+    LockedPick(Id),
 }
 
 impl fmt::Display for ApplyError {
@@ -86,6 +105,10 @@ impl fmt::Display for ApplyError {
             Self::Unassigned(id) => write!(f, "trace {id} has no phenomenology assigned"),
             Self::InvalidProcessing(why) => write!(f, "invalid processing: {why}"),
             Self::Locked(id) => write!(f, "trace {id} has a locked alignment"),
+            Self::InvalidLocation => write!(f, "latitude, longitude or elevation out of range"),
+            Self::UnknownPick(id) => write!(f, "no pick {id}"),
+            Self::InvalidPick(why) => write!(f, "invalid pick: {why}"),
+            Self::LockedPick(id) => write!(f, "pick {id} is manual and locked"),
         }
     }
 }
@@ -100,6 +123,8 @@ pub struct Project {
     phenomenologies: Vec<Phenomenology>,
     sensors: Vec<Sensor>,
     traces: Vec<Trace>,
+    picks: Vec<Pick>,
+    pub origin: Option<Origin>,
 }
 
 impl Project {
@@ -188,6 +213,12 @@ impl Project {
                 });
             }
             Change::SetClockCorrection { sensor, clock } => self.sensor_mut(*sensor)?.clock = *clock,
+            Change::SetSensorLocation { sensor, location } => {
+                if location.is_some_and(|l| !l.is_valid()) {
+                    return Err(ApplyError::InvalidLocation);
+                }
+                self.sensor_mut(*sensor)?.location = *location;
+            }
             Change::AddTrace(trace) => {
                 if self.sensor(trace.sensor).is_none() {
                     return Err(ApplyError::UnknownSensor(trace.sensor));
@@ -207,6 +238,7 @@ impl Project {
                     .position(|t| t.id == *trace)
                     .ok_or(ApplyError::UnknownTrace(*trace))?;
                 self.traces.remove(index);
+                self.picks.retain(|p| p.trace != *trace);
             }
             Change::SetProcessing { trace, processing } => {
                 let current = self.trace(*trace).ok_or(ApplyError::UnknownTrace(*trace))?;
@@ -233,6 +265,27 @@ impl Project {
                 }
                 self.trace_mut(*trace)?.alignment = alignment.clone();
             }
+            Change::SetPick { pick, revert } => {
+                let trace = self.trace(pick.trace).ok_or(ApplyError::UnknownTrace(pick.trace))?;
+                if !(pick.uncertainty_s.is_finite() && pick.uncertainty_s > 0.0) {
+                    return Err(ApplyError::InvalidPick("uncertainty must be positive".to_string()));
+                }
+                if !pick.provenance.is_manual() && !revert {
+                    if self.trace_phenomenology(trace).is_none() {
+                        return Err(ApplyError::Unassigned(pick.trace));
+                    }
+                    if let Some(manual) = self.replaced_picks(pick).find(|p| p.provenance.is_manual()) {
+                        return Err(ApplyError::LockedPick(manual.id));
+                    }
+                }
+                self.picks.retain(|p| !(p.id == pick.id || (p.trace == pick.trace && p.phase == pick.phase)));
+                self.picks.push(pick.clone());
+            }
+            Change::RemovePick { pick } => {
+                let index = self.picks.iter().position(|p| p.id == *pick).ok_or(ApplyError::UnknownPick(*pick))?;
+                self.picks.remove(index);
+            }
+            Change::SetOrigin { origin } => self.origin = origin.clone(),
         }
         Ok(())
     }
@@ -254,8 +307,55 @@ impl Project {
                 alignment: t.alignment.clone(),
                 revert: true,
             }),
+            Change::SetSensorLocation { sensor, .. } => {
+                self.sensor(*sensor).map(|s| Change::SetSensorLocation { sensor: *sensor, location: s.location })
+            }
+            Change::SetPick { pick, .. } => {
+                let replaced: Vec<&Pick> = self.replaced_picks(pick).collect();
+                match replaced.as_slice() {
+                    [] => Some(Change::RemovePick { pick: pick.id }),
+                    // Matches the new pick by id or phase, so it replaces it back.
+                    [old] => Some(Change::SetPick { pick: (*old).clone(), revert: true }),
+                    _ => None,
+                }
+            }
+            Change::RemovePick { pick } => {
+                self.pick(*pick).map(|p| Change::SetPick { pick: p.clone(), revert: true })
+            }
+            Change::SetOrigin { .. } => Some(Change::SetOrigin { origin: self.origin.clone() }),
             _ => None,
         }
+    }
+
+    /// Picks a [`Change::SetPick`] of `pick` would replace.
+    fn replaced_picks<'a>(&'a self, pick: &'a Pick) -> impl Iterator<Item = &'a Pick> + 'a {
+        self.picks.iter().filter(|p| p.id == pick.id || (p.trace == pick.trace && p.phase == pick.phase))
+    }
+
+    pub fn picks(&self) -> &[Pick] {
+        &self.picks
+    }
+
+    pub fn pick(&self, id: Id) -> Option<&Pick> {
+        self.picks.iter().find(|p| p.id == id)
+    }
+
+    pub fn trace_picks(&self, trace: Id) -> impl Iterator<Item = &Pick> {
+        self.picks.iter().filter(move |p| p.trace == trace)
+    }
+
+    /// A recorded time on `trace`'s clock, corrected.
+    pub fn correct(&self, trace: &Trace, recorded: Timestamp) -> Timestamp {
+        match (self.sensor(trace.sensor), self.reference) {
+            (Some(sensor), Some(reference)) => sensor.clock.apply(recorded, reference),
+            (Some(sensor), None) => sensor.clock.apply(recorded, trace.start),
+            (None, _) => recorded,
+        }
+    }
+
+    /// Clock-corrected arrival time of a pick: what location uses.
+    pub fn pick_time(&self, pick: &Pick) -> Option<Timestamp> {
+        self.trace(pick.trace).map(|t| self.correct(t, pick.time))
     }
 
     pub fn phenomenologies(&self) -> &[Phenomenology] {
@@ -303,11 +403,7 @@ impl Project {
 
     /// Clock-corrected start of a trace.
     pub fn corrected_start(&self, trace: &Trace) -> Timestamp {
-        match (self.sensor(trace.sensor), self.reference) {
-            (Some(sensor), Some(reference)) => sensor.clock.apply(trace.start, reference),
-            (Some(sensor), None) => sensor.clock.apply(trace.start, trace.start),
-            (None, _) => trace.start,
-        }
+        self.correct(trace, trace.start)
     }
 
     /// Clock-corrected start plus the alignment offset: where the trace is drawn and analysed.
@@ -485,6 +581,75 @@ mod tests {
         assert!(project.trace(t.id).unwrap().processing.filter.is_some());
         project.commit(&analyst(), undo).unwrap();
         assert!(project.trace(t.id).unwrap().processing.is_identity());
+    }
+
+    fn pick(trace: Id, phase: &str, offset: f64, provenance: Provenance) -> Pick {
+        Pick {
+            id: Id::generate(),
+            trace,
+            time: Timestamp::new(1_000, offset),
+            phase: phase.to_string(),
+            uncertainty_s: 0.01,
+            provenance,
+        }
+    }
+
+    #[test]
+    fn picks_replace_per_phase_and_manual_ones_are_locked() {
+        let (mut project, _) = Project::create("p", &analyst());
+        let t = assigned(&mut project);
+        let auto = Provenance::Auto { stage: "pick".into(), config_hash: "x".into() };
+        let manual = Provenance::Manual { analyst: analyst(), at: Timestamp::now() };
+        let set = |pick: Pick| Change::SetPick { pick, revert: false };
+
+        project.commit(&analyst(), set(pick(t.id, "P", 0.1, auto.clone()))).unwrap();
+        project.commit(&analyst(), set(pick(t.id, "S", 0.3, auto.clone()))).unwrap();
+        let replacement = set(pick(t.id, "P", 0.2, manual));
+        let undo = project.inverse(&replacement).unwrap();
+        project.commit(&analyst(), replacement).unwrap();
+        assert_eq!(project.trace_picks(t.id).count(), 2);
+        let manual_id = project.trace_picks(t.id).find(|p| p.phase == "P").unwrap().id;
+        assert_eq!(
+            project.commit(&analyst(), set(pick(t.id, "P", 0.4, auto))),
+            Err(ApplyError::LockedPick(manual_id))
+        );
+        project.commit(&analyst(), undo).unwrap();
+        let p = project.trace_picks(t.id).find(|p| p.phase == "P").unwrap();
+        assert_eq!((p.time, p.provenance.is_manual()), (Timestamp::new(1_000, 0.1), false));
+
+        project.commit(&analyst(), Change::RemoveTrace { trace: t.id }).unwrap();
+        assert!(project.picks().is_empty());
+    }
+
+    #[test]
+    fn pick_times_are_clock_corrected() {
+        let (mut project, _) = Project::create("p", &analyst());
+        let t = assigned(&mut project);
+        let manual = Provenance::Manual { analyst: analyst(), at: Timestamp::now() };
+        let p = pick(t.id, "", 0.5, manual);
+        project.commit(&analyst(), Change::SetPick { pick: p.clone(), revert: false }).unwrap();
+        let clock = ClockCorrection { offset_s: 0.25, drift_ppm: 0.0 };
+        project.commit(&analyst(), Change::SetClockCorrection { sensor: t.sensor, clock }).unwrap();
+        assert_eq!(project.pick_time(&p), Some(Timestamp::new(1_000, 0.75)));
+        assert_eq!(p.phase_label(), "onset");
+    }
+
+    #[test]
+    fn sensor_locations_validate_and_undo() {
+        let (mut project, _) = Project::create("p", &analyst());
+        let t = assigned(&mut project);
+        let bad = Location { latitude: 91.0, longitude: 0.0, elevation_m: 0.0 };
+        assert_eq!(
+            project.commit(&analyst(), Change::SetSensorLocation { sensor: t.sensor, location: Some(bad) }),
+            Err(ApplyError::InvalidLocation)
+        );
+        let good = Location { latitude: 35.0, longitude: -106.0, elevation_m: 1500.0 };
+        let change = Change::SetSensorLocation { sensor: t.sensor, location: Some(good) };
+        let undo = project.inverse(&change).unwrap();
+        project.commit(&analyst(), change).unwrap();
+        assert_eq!(project.sensor(t.sensor).unwrap().location, Some(good));
+        project.commit(&analyst(), undo).unwrap();
+        assert_eq!(project.sensor(t.sensor).unwrap().location, None);
     }
 
     #[test]

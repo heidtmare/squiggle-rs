@@ -36,6 +36,7 @@ pub fn read(path: &Path, bytes: &[u8], layout: &RawLayout) -> Result<Vec<Recordi
             sample_rate: None,
             samples,
             suggestion: None,
+            location: None,
         })
         .collect())
 }
