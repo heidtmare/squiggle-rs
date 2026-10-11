@@ -1,14 +1,24 @@
 # Squiggle
 
-An interactive waveform plot: pan, zoom and pick your way around many
-high-density polylines at once.
+An interactive waveform plotter built on [Bevy](https://bevy.org). Pan, zoom
+and pick your way around hundreds of high-density polylines at once, then run
+them through Fourier and wavelet transforms without leaving the plot.
 
-This is a Rust port of the JavaFX application at [`heidtmare/squiggle`](https://github.com/heidtmare/squiggle),
-rebuilt on [Bevy](https://bevy.org). The original drew everything onto a
-JavaFX `Canvas` from a 30 fps animation timer, projecting every coordinate on
-the CPU each frame. Here the points are uploaded to the GPU once and the
-projection happens in a vertex shader, so panning and zooming no longer cost
-anything per point.
+## Features
+
+- **Fast at scale.** Samples are uploaded to the GPU once and projected in a
+  vertex shader, so panning and zooming cost nothing per point. A hundred
+  squiggles of ten thousand samples each stay smooth.
+- **Independent axis zoom.** Zoom x and y together or separately, anchored on
+  the point under the cursor — waveform axes rarely share a unit.
+- **Even strokes at any zoom.** Lines are widened in screen space after
+  projection, so they keep the same thickness however the axes are stretched.
+- **Linear and logarithmic axes**, with ticks and labels that follow the view.
+- **Exact picking.** Click a line to select it and see its individual samples.
+- **Signal transforms.** Fourier, DFT, FFT, STFT, inverse Fourier and wavelet
+  decompositions, with the results plotted alongside the source.
+- **Self-checking demos** that run each transform on a signal with a known
+  answer and show the numerical checks next to the picture.
 
 ## Running
 
@@ -17,14 +27,21 @@ cargo run -p squiggle-app --release
 ```
 
 The plot starts empty; **Add Squiggle** puts one on it. To start with a full
-plot instead — which is what the Java `SquigglePlotExample` did:
+plot instead:
 
 ```sh
 cargo run -p squiggle-app --release -- --squiggles 100 --samples 10000
 ```
 
-`--release` matters: a debug build of the plot is playable but not smooth. The
-workspace already compiles dependencies with optimizations in dev profiles.
+`--release` matters: a debug build is usable but not smooth. The workspace
+already compiles dependencies with optimizations in dev profiles.
+
+| Flag | Effect |
+| --- | --- |
+| `--squiggles N` | Start with `N` demo squiggles |
+| `--samples N` | Samples per demo squiggle |
+| `--demo fourier\|wavelet` | Load a transform demo at startup |
+| `--screenshot FILE` | Save the window once the plot settles, then quit |
 
 ## Using it
 
@@ -38,9 +55,12 @@ workspace already compiles dependencies with optimizations in dev profiles.
 | Add a demo squiggle | **Add Squiggle** in the toolbar |
 | Frame everything | **Fit** in the toolbar |
 | List and delete squiggles | The **Squiggles** sidebar handle on the left |
+| Delete the selection | **Edit ▸ Delete selected** |
 | Transform a squiggle | Select it, then pick from the **Transform** menu |
 
-Independent x and y zoom is deliberate: waveform axes rarely share a unit.
+Zoom is multiplicative, so each scroll notch changes the scale by the same
+ratio at every magnification. When a squiggle is selected, sample dots closer
+than six pixels apart are thinned so dense data stays readable.
 
 ## Transforms
 
@@ -64,28 +84,25 @@ samples, taking the interval from the first and last x.
 
 A transformed squiggle keeps its complex spectrum alongside the plotted
 points, which is what lets the inverse reproduce the original exactly rather
-than reconstruct it from magnitudes alone. The transforms live in
-`squiggle_core::transform` and, like the rest of the core, need no
-dependencies — the FFT is implemented there.
+than reconstruct it from magnitudes alone.
 
-### Demo
+### Demos
 
-The **Demo** menu, or `--demo fourier` / `--demo wavelet` at startup, loads a
-test signal whose transform is known in advance. The result is plotted beside
-the expected answer, and a side panel lists numerical checks with pass or
-fail marks: peak heights, phase, Parseval, DFT against FFT, exact inverse
-reconstruction, wavelet bands summing to the signal, energy kept by the
-coefficients, and each feature showing up in its own band at its own time.
-The same checks run as unit tests.
+The **Demo** menu, or `--demo` at startup, loads a test signal whose transform
+is known in advance. The result is plotted beside the expected answer, and a
+side panel lists numerical checks with pass or fail marks: peak heights,
+phase, Parseval, DFT against FFT, exact inverse reconstruction, wavelet bands
+summing to the signal, energy kept by the coefficients, and each feature
+showing up in its own band at its own time. The same checks run as unit tests.
 
 ```sh
 cargo run -p squiggle-app --release -- --demo wavelet
 cargo run -p squiggle-app --release -- --demo fourier --screenshot fourier.png
 ```
 
-`--screenshot FILE` saves the window once the plot has settled, then quits.
+## How it works
 
-## Layout
+### Layout
 
 ```
 squiggle-core/   model, coordinate math and transforms, no dependencies
@@ -93,26 +110,12 @@ squiggle-app/    the Bevy application
   assets/shaders/squiggle_line.wgsl   screen-space polyline expansion
   src/plot/      camera, input, meshing, overlay
   src/ui.rs      menu bar, toolbar, sidebar (egui)
+  src/showcase.rs  transform demo scenes and their checks
 ```
 
-`squiggle-core` has no dependencies at all, which keeps the parts worth testing
-— projection, tick generation, bounds, hit-testing — testable with
-`cargo test -p squiggle-core` and nothing on screen.
-
-## How the pieces map to the Java original
-
-| Java | Rust |
-| --- | --- |
-| `Squiggle` / `SimpleSquiggle` | `squiggle_core::Squiggle` |
-| `SquiggleCoordinate` | `squiggle_core::Point` |
-| `RenderingAttributes` | `squiggle_core::Style` |
-| `RenderingContext` (transform half) | `squiggle_core::PlotView` |
-| `RenderingContext` (drawing half) | `plot::line`, `plot::overlay` |
-| `LinearXAxis`, `LinearYAxis`, `Logrithmic*Axis` | `squiggle_core::Axis` |
-| `SquigglePlot` control | `plot::PlotPlugin` and the `Plot` resource |
-| `Sidebar`, `SidebarItem`, FXML view | `ui.rs` |
-| `SquigglePlotExample` | the `--squiggles` flag, in `demo.rs` |
-| `LazyPropertyWrapper` | dropped; Bevy change detection covers it |
+`squiggle-core` has no dependencies at all — the FFT is implemented there —
+which keeps the parts worth testing (projection, tick generation, bounds,
+hit-testing, transforms) testable with nothing on screen.
 
 ### Rendering
 
@@ -132,41 +135,9 @@ which is the opposite trade from the squiggles themselves.
 
 ### Picking
 
-The Java version picked by rendering the scene again with every object in a
-unique colour and reading back the pixel under the cursor — an extra full draw
-and a GPU stall per click. This port measures the distance from the click to
-each line segment instead, after rejecting squiggles by their screen-space
-bounding box. It is cheaper, exact, and needs no second canvas.
-
-## Deliberate differences
-
-These are places where the port does not match the original's behaviour,
-because the original's behaviour was a bug or a stub.
-
-- **Zoom is multiplicative.** The Java code added a flat `0.05` to the scale per
-  scroll notch, which crawls when zoomed in and jumps when zoomed out. A constant
-  ratio behaves the same at every magnification. Zoom also holds the point under
-  the cursor still, which the original did not.
-- **Logarithmic axes work.** `LogrithmicXAxis` left its minor ticks as a `TODO`
-  and only labelled powers in one direction; `LogrithmicYAxis` was a copy of the
-  linear axis with no log behaviour at all. `AxisKind::Logarithmic` now places
-  major ticks on decade boundaries in both directions and subdivides each decade.
-- **Tick generation is bounded.** The Java loops would spin indefinitely on a
-  zero or negative tick step. Steps that produce no ticks yield none, and an
-  axis will not emit more ticks than it could possibly show.
-- **Absent z and m are `None`.** The original signalled them with `NaN`, which
-  quietly propagated into bounds; bounds now ignore non-finite samples.
-- **The sidebar does something.** Its content pane was an empty placeholder in
-  the original. It now lists the squiggles with their colour and sample count,
-  and selecting or deleting there matches what clicking on the plot does.
-- **Menu items are wired up.** File ▸ Close, Edit ▸ Delete and Help ▸ About did
-  nothing in the original.
-- **Selected samples are thinned.** A selected squiggle drew a dot per sample,
-  including thousands that landed on the same pixel. Dots closer than six pixels
-  on screen are skipped, in the same spirit as the original's habit of averaging
-  samples that shared a screen column. They also take the squiggle's own colour
-  rather than a fixed cyan, which in the original matched the selected line and
-  so was invisible against it.
+A click measures the distance to each line segment, after rejecting squiggles
+by their screen-space bounding box. There is no second render pass and no GPU
+readback, and the result is exact.
 
 ## Testing
 
@@ -178,4 +149,5 @@ cargo test          # the whole workspace
 anchoring, tick placement under pan and zoom, label formatting, bounds
 maintenance, hit-testing, and the transforms: FFT against DFT, exact
 forward-inverse round trips, amplitude scaling, STFT frame placement, and
-wavelet orthonormality and reconstruction. `squiggle-app` tests the mesh builder's topology.
+wavelet orthonormality and reconstruction. `squiggle-app` tests the mesh
+builder's topology and argument parsing.
