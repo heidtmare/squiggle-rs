@@ -6,6 +6,7 @@
 
 mod demo;
 mod plot;
+mod showcase;
 mod ui;
 
 use bevy::prelude::*;
@@ -35,7 +36,9 @@ fn main() -> AppExit {
         .add_plugins(EguiPlugin::default())
         .add_plugins(plot::PlotPlugin)
         .add_plugins(ui::UiPlugin)
+        .add_plugins(showcase::ShowcasePlugin)
         .insert_resource(options)
         .add_systems(Startup, demo::seed)
+        .add_systems(Update, demo::screenshot)
         .run()
 }

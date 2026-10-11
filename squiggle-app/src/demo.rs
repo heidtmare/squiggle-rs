@@ -6,10 +6,12 @@
 //! as a startup flag.
 
 use bevy::prelude::*;
+use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use rand::Rng;
 use squiggle_core::{Point, Rgba, Squiggle, Style};
 
 use crate::plot::AddSquiggle;
+use crate::showcase::{self, LoadScene, Scene, Showcase};
 
 /// Samples per squiggle, as the Java toolbar used.
 pub const DEFAULT_SAMPLE_COUNT: usize = 1000;
@@ -18,25 +20,31 @@ pub const DEFAULT_SAMPLE_COUNT: usize = 1000;
 const SPACER: f64 = 10.0;
 
 /// Startup options gathered from the command line.
-#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Resource, Clone, Debug, PartialEq, Eq)]
 pub struct DemoOptions {
     /// How many squiggles to put on the plot at startup.
     pub seed_count: usize,
     /// How many samples each generated squiggle carries.
     pub sample_count: usize,
+    /// A transform demo scene to open at startup.
+    pub scene: Option<Scene>,
+    /// Save a screenshot here once the plot has settled, then quit.
+    pub screenshot: Option<std::path::PathBuf>,
 }
 
 impl Default for DemoOptions {
     fn default() -> Self {
-        Self { seed_count: 0, sample_count: DEFAULT_SAMPLE_COUNT }
+        Self { seed_count: 0, sample_count: DEFAULT_SAMPLE_COUNT, scene: None, screenshot: None }
     }
 }
 
 pub const USAGE: &str = "\
-Usage: squiggle-app [--squiggles N] [--samples N]
+Usage: squiggle-app [--squiggles N] [--samples N] [--demo SCENE] [--screenshot FILE]
 
-  --squiggles N  put N squiggles on the plot at startup (default 0)
-  --samples N    samples per generated squiggle (default 1000)
+  --squiggles N      put N squiggles on the plot at startup (default 0)
+  --samples N        samples per generated squiggle (default 1000)
+  --demo SCENE       open a transform demo: fourier or wavelet
+  --screenshot FILE  save a PNG of the window once the plot settles, then quit
 ";
 
 impl DemoOptions {
@@ -59,6 +67,17 @@ impl DemoOptions {
             match argument.as_str() {
                 "--squiggles" => options.seed_count = value(&mut args)?,
                 "--samples" => options.sample_count = value(&mut args)?,
+                "--demo" => {
+                    let name = args.next().ok_or_else(|| format!("{argument} needs a scene"))?;
+                    options.scene = Some(
+                        Scene::parse(&name)
+                            .ok_or_else(|| format!("unknown demo scene: {name}\n\n{USAGE}"))?,
+                    );
+                }
+                "--screenshot" => {
+                    let path = args.next().ok_or_else(|| format!("{argument} needs a file"))?;
+                    options.screenshot = Some(path.into());
+                }
                 "--help" | "-h" => return Err(USAGE.to_string()),
                 other => return Err(format!("unrecognised argument: {other}\n\n{USAGE}")),
             }
@@ -68,8 +87,11 @@ impl DemoOptions {
     }
 }
 
-/// Fills the plot at startup when `--squiggles` asked for it.
-pub fn seed(options: Res<DemoOptions>, mut add: MessageWriter<AddSquiggle>) {
+/// Fills the plot at startup when `--squiggles` or `--demo` asked for it.
+pub fn seed(options: Res<DemoOptions>, mut add: MessageWriter<AddSquiggle>, mut load: MessageWriter<LoadScene>) {
+    if let Some(scene) = options.scene {
+        load.write(LoadScene(scene));
+    }
     for index in 0..options.seed_count {
         add.write(AddSquiggle(generate(index, options.sample_count)));
     }
@@ -86,6 +108,35 @@ pub fn generate(index: usize, sample_count: usize) -> Squiggle {
 
     Squiggle::with_points(format!("Squiggle {index}"), points)
         .with_style(Style::new(random_color(), Style::SQUIGGLE.line_width))
+}
+
+/// Frames to let the plot render after it settles before capturing it, and to
+/// let the capture reach the disk before quitting.
+const SCREENSHOT_SETTLE_FRAMES: u32 = 20;
+const SCREENSHOT_SAVE_FRAMES: u32 = 30;
+
+/// Takes the `--screenshot` capture once the plot has settled, then quits.
+pub fn screenshot(
+    mut commands: Commands,
+    options: Res<DemoOptions>,
+    showcase: Res<Showcase>,
+    mut frames: Local<u32>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let Some(path) = &options.screenshot else {
+        return;
+    };
+    // Without a scene there is nothing to wait for but the first frames.
+    if options.scene.is_some() && !showcase::settled(&showcase) {
+        return;
+    }
+
+    *frames += 1;
+    if *frames == SCREENSHOT_SETTLE_FRAMES {
+        commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path.clone()));
+    } else if *frames == SCREENSHOT_SETTLE_FRAMES + SCREENSHOT_SAVE_FRAMES {
+        exit.write(AppExit::Success);
+    }
 }
 
 fn random_color() -> Rgba {
@@ -110,8 +161,20 @@ mod tests {
     fn both_counts_can_be_set() {
         assert_eq!(
             parse(&["--squiggles", "100", "--samples", "10000"]),
-            Ok(DemoOptions { seed_count: 100, sample_count: 10_000 })
+            Ok(DemoOptions { seed_count: 100, sample_count: 10_000, ..DemoOptions::default() })
         );
+    }
+
+    #[test]
+    fn a_demo_scene_and_screenshot_can_be_asked_for() {
+        let options = parse(&["--demo", "Wavelet", "--screenshot", "out.png"]).expect("parses");
+        assert_eq!(options.scene, Some(Scene::Wavelet));
+        assert_eq!(options.screenshot, Some("out.png".into()));
+    }
+
+    #[test]
+    fn an_unknown_demo_scene_is_rejected() {
+        assert!(parse(&["--demo", "laplace"]).is_err());
     }
 
     #[test]

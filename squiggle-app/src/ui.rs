@@ -19,9 +19,13 @@ use squiggle_core::{
 
 use crate::demo::{self, DemoOptions};
 use crate::plot::{AddSquiggle, FitToData, Plot, PlotCamera, RemoveSquiggle, SquiggleModel};
+use crate::showcase::{LoadScene, Scene, Showcase};
 
 const HANDLE_WIDTH: f32 = 26.0;
 const SIDEBAR_WIDTH: f32 = 300.0;
+const SHOWCASE_WIDTH: f32 = 340.0;
+const PASS_COLOR: egui::Color32 = egui::Color32::from_rgb(90, 210, 110);
+const FAIL_COLOR: egui::Color32 = egui::Color32::from_rgb(235, 80, 80);
 
 pub struct UiPlugin;
 
@@ -40,6 +44,7 @@ pub struct PlotCommands<'w> {
     add: MessageWriter<'w, AddSquiggle>,
     remove: MessageWriter<'w, RemoveSquiggle>,
     fit: MessageWriter<'w, FitToData>,
+    load: MessageWriter<'w, LoadScene>,
     exit: MessageWriter<'w, AppExit>,
 }
 
@@ -126,7 +131,7 @@ fn setup(mut commands: Commands, mut egui_settings: ResMut<EguiGlobalSettings>) 
 }
 
 /// Draws the chrome and hands the space left over to the plot camera.
-// A Bevy system declares everything it touches in its signature; eight is what
+// A Bevy system declares everything it touches in its signature; nine is what
 // drawing the whole chrome needs.
 #[allow(clippy::too_many_arguments)]
 fn chrome(
@@ -137,6 +142,7 @@ fn chrome(
     window: Single<&Window, With<PrimaryWindow>>,
     mut squiggles: Query<(Entity, &mut SquiggleModel)>,
     options: Res<DemoOptions>,
+    mut showcase: ResMut<Showcase>,
     mut commands: PlotCommands,
 ) -> Result {
     let ctx = contexts.ctx_mut()?.clone();
@@ -185,11 +191,22 @@ fn chrome(
             .width();
     }
 
+    let right = match &showcase.current {
+        Some(_) => egui::Panel::right("squiggle_showcase")
+            .default_size(SHOWCASE_WIDTH)
+            .min_size(220.0)
+            .show(&mut root, |ui| showcase_panel(ui, &mut showcase, &mut commands))
+            .response
+            .rect
+            .width(),
+        None => 0.0,
+    };
+
     about_window(&ctx, &mut chrome);
     transform_window(&ctx, &mut chrome);
     transform_error_window(&ctx, &mut chrome);
 
-    hand_viewport_to_plot(&window, &mut camera, &mut plot, left, top);
+    hand_viewport_to_plot(&window, &mut camera, &mut plot, left, right, top);
     Ok(())
 }
 
@@ -224,6 +241,18 @@ fn menu_bar(
             }
         });
         ui.menu_button("Transform", |ui| transform_menu(ui, chrome, squiggles, commands));
+        ui.menu_button("Demo", |ui| {
+            for scene in Scene::ALL {
+                if ui
+                    .button(scene.label())
+                    .on_hover_text("Replace the plot with a known signal, its transform and checks on the result")
+                    .clicked()
+                {
+                    commands.load.write(LoadScene(scene));
+                    ui.close();
+                }
+            }
+        });
         ui.menu_button("Help", |ui| {
             if ui.button("About").clicked() {
                 chrome.about_open = true;
@@ -471,6 +500,67 @@ fn squiggle_list(
     });
 }
 
+/// The demo scene's legend, and its checks marked pass or fail.
+fn showcase_panel(ui: &mut egui::Ui, showcase: &mut Showcase, commands: &mut PlotCommands) {
+    let Some(loaded) = &showcase.current else {
+        return;
+    };
+
+    let mut close = false;
+    ui.horizontal(|ui| {
+        ui.heading(loaded.title);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            close = ui.small_button("Close").on_hover_text("Close the demo panel").clicked();
+        });
+    });
+
+    ui.horizontal(|ui| {
+        for scene in Scene::ALL {
+            if ui.selectable_label(loaded.scene == scene, scene.label()).clicked() && loaded.scene != scene {
+                commands.load.write(LoadScene(scene));
+            }
+        }
+    });
+    ui.separator();
+
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.label(loaded.description);
+        ui.add_space(6.0);
+        for (color, meaning) in &loaded.legend {
+            ui.horizontal(|ui| {
+                swatch(ui, *color);
+                ui.label(*meaning);
+            });
+        }
+
+        ui.separator();
+        let passed = loaded.checks.iter().filter(|check| check.passed).count();
+        let (summary, color) = if loaded.all_passed() {
+            (format!("All {passed} checks pass"), PASS_COLOR)
+        } else {
+            (format!("{passed} of {} checks pass", loaded.checks.len()), FAIL_COLOR)
+        };
+        ui.label(egui::RichText::new(summary).strong().color(color));
+        ui.add_space(4.0);
+
+        for check in &loaded.checks {
+            ui.horizontal_top(|ui| {
+                let (mark, color) = if check.passed { ("✔", PASS_COLOR) } else { ("✘", FAIL_COLOR) };
+                ui.label(egui::RichText::new(mark).color(color).strong());
+                ui.vertical(|ui| {
+                    ui.label(&check.claim);
+                    ui.label(egui::RichText::new(&check.measured).weak().monospace());
+                });
+            });
+            ui.add_space(2.0);
+        }
+    });
+
+    if close {
+        showcase.current = None;
+    }
+}
+
 fn about_window(ctx: &egui::Context, chrome: &mut Chrome) {
     if !chrome.about_open {
         return;
@@ -497,10 +587,11 @@ fn hand_viewport_to_plot(
     camera: &mut Camera,
     plot: &mut Plot,
     left: f32,
+    right: f32,
     top: f32,
 ) {
     let logical_size = Vec2::new(
-        (window.width() - left).max(0.0),
+        (window.width() - left - right).max(0.0),
         (window.height() - top).max(0.0),
     );
 

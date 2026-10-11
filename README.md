@@ -68,6 +68,23 @@ than reconstruct it from magnitudes alone. The transforms live in
 `squiggle_core::transform` and, like the rest of the core, need no
 dependencies — the FFT is implemented there.
 
+### Demo
+
+The **Demo** menu, or `--demo fourier` / `--demo wavelet` at startup, loads a
+test signal whose transform is known in advance. The result is plotted beside
+the expected answer, and a side panel lists numerical checks with pass or
+fail marks: peak heights, phase, Parseval, DFT against FFT, exact inverse
+reconstruction, wavelet bands summing to the signal, energy kept by the
+coefficients, and each feature showing up in its own band at its own time.
+The same checks run as unit tests.
+
+```sh
+cargo run -p squiggle-app --release -- --demo wavelet
+cargo run -p squiggle-app --release -- --demo fourier --screenshot fourier.png
+```
+
+`--screenshot FILE` saves the window once the plot has settled, then quits.
+
 ## Layout
 
 ```
