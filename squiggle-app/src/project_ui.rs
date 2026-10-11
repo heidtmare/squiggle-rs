@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 use squiggle_core::phenomenology::Phase;
 use squiggle_core::sensor::Provenance;
-use squiggle_core::{Change, Phenomenology, PhenomenologyId, Project, Propagation, Rgba, SampleKind};
+use squiggle_core::{Change, NumberFormat, Phenomenology, PhenomenologyId, Project, Propagation, Rgba, SampleKind};
 
 use crate::workspace::{ImportQueue, SampleState, UNASSIGNED_COLOR, Workspace, WorkspaceRequest};
 
@@ -64,7 +64,7 @@ pub fn windows(
     mut requests: MessageWriter<WorkspaceRequest>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?.clone();
-    import_window(&ctx, &mut workspace, &mut queue, &mut windows);
+    import_window(&ctx, &mut workspace, &mut queue, &mut windows, &mut requests);
     sensors_window(&ctx, &mut workspace, &mut windows);
     phenomenologies_window(&ctx, &workspace, &mut windows);
     editor_window(&ctx, &mut workspace, &mut windows);
@@ -105,7 +105,65 @@ fn phenomenology_choice(
     *value != before
 }
 
-fn import_window(ctx: &egui::Context, workspace: &mut Workspace, queue: &mut ImportQueue, windows: &mut ProjectWindows) {
+/// Layout editor for files no reader recognised.
+fn raw_section(ui: &mut egui::Ui, queue: &mut ImportQueue, requests: &mut MessageWriter<WorkspaceRequest>) {
+    if queue.raw_pending.is_empty() {
+        return;
+    }
+    ui.strong("Unrecognised files");
+    ui.label("No reader recognised these. Describe their layout to read them as raw binary samples; \
+              the layout is saved with each trace.");
+    for path in &queue.raw_pending {
+        let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+        ui.label(egui::RichText::new(name).monospace()).on_hover_text(path.display().to_string());
+    }
+    let layout = &mut queue.raw_layout;
+    egui::Grid::new("raw_layout").num_columns(2).show(ui, |ui| {
+        ui.label("Sample format");
+        egui::ComboBox::from_id_salt("raw_format").selected_text(layout.format.label()).show_ui(ui, |ui| {
+            for format in NumberFormat::ALL {
+                ui.selectable_value(&mut layout.format, format, format.label());
+            }
+        });
+        ui.end_row();
+        ui.label("Byte order");
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut layout.big_endian, false, "Little-endian");
+            ui.radio_value(&mut layout.big_endian, true, "Big-endian");
+        });
+        ui.end_row();
+        ui.label("Samples");
+        ui.checkbox(&mut layout.complex, "Complex (interleaved I, Q)");
+        ui.end_row();
+        ui.label("Channels");
+        ui.add(egui::DragValue::new(&mut layout.channels).range(1..=1024)).on_hover_text("Interleaved per frame");
+        ui.end_row();
+        ui.label("Header");
+        ui.add(egui::DragValue::new(&mut layout.header_bytes).suffix(" bytes"));
+        ui.end_row();
+        ui.label("Scale");
+        ui.add(egui::DragValue::new(&mut layout.scale).speed(0.001)).on_hover_text("Physical units per stored value");
+        ui.end_row();
+    });
+    ui.label(egui::RichText::new(format!("{} bytes per frame", layout.frame_size())).weak());
+    ui.horizontal(|ui| {
+        if ui.button("Read as raw").clicked() {
+            requests.write(WorkspaceRequest::ImportRaw(queue.raw_pending.clone(), queue.raw_layout));
+        }
+        if ui.button("Skip").clicked() {
+            queue.raw_pending.clear();
+        }
+    });
+    ui.separator();
+}
+
+fn import_window(
+    ctx: &egui::Context,
+    workspace: &mut Workspace,
+    queue: &mut ImportQueue,
+    windows: &mut ProjectWindows,
+    requests: &mut MessageWriter<WorkspaceRequest>,
+) {
     if !queue.is_open() {
         return;
     }
@@ -121,6 +179,7 @@ fn import_window(ctx: &egui::Context, workspace: &mut Workspace, queue: &mut Imp
             for failure in &queue.failures {
                 ui.label(egui::RichText::new(format!("✘ {failure}")).color(PROBLEM_COLOR));
             }
+            raw_section(ui, queue, requests);
             if queue.rows.is_empty() {
                 return;
             }
@@ -168,7 +227,10 @@ fn import_window(ctx: &egui::Context, workspace: &mut Workspace, queue: &mut Imp
                             }
                         });
                         ui.add_sized([80.0, height], egui::TextEdit::singleline(&mut row.rate));
-                        ui.label(row.samples.len().to_string());
+                        match row.samples.kind() {
+                            SampleKind::Real => ui.label(row.samples.len().to_string()),
+                            SampleKind::Complex => ui.label(format!("{} IQ", row.samples.len())),
+                        };
 
                         let known = project.sensor_by_code(row.code.trim()).and_then(|s| s.assignment.as_ref());
                         match known {

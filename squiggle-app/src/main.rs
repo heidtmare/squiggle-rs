@@ -8,6 +8,7 @@ mod demo;
 mod plot;
 mod project_ui;
 mod showcase;
+mod tracks;
 mod ui;
 mod workspace;
 
@@ -40,6 +41,7 @@ fn main() -> AppExit {
         .add_plugins(plot::PlotPlugin)
         .add_plugins(ui::UiPlugin)
         .add_plugins(workspace::WorkspacePlugin)
+        .add_plugins(tracks::TracksPlugin)
         .add_plugins(showcase::ShowcasePlugin)
         .insert_resource(options)
         .add_systems(Startup, demo::seed)

@@ -17,6 +17,9 @@ use line::SquiggleLineMaterial;
 
 /// Gutters reserved for the axes, matching the Java plot's insets.
 pub const AXIS_GUTTER: f64 = 20.5;
+/// Gutters in tracks mode: row labels on the left, time axis below.
+pub const TRACK_LABEL_WIDTH: f64 = 170.0;
+pub const TRACK_AXIS_HEIGHT: f64 = 30.0;
 
 /// Squiggles sit furthest back; later ones are nudged forward so they stack in
 /// the order they were added.
@@ -38,6 +41,7 @@ impl Plugin for PlotPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(Material2dPlugin::<SquiggleLineMaterial>::default())
             .init_resource::<Plot>()
+            .init_resource::<PlotMode>()
             .init_resource::<input::DragState>()
             .add_message::<AddSquiggle>()
             .add_message::<RemoveSquiggle>()
@@ -51,16 +55,48 @@ impl Plugin for PlotPlugin {
                     rebuild_meshes,
                     sync_materials,
                     input::track_cursor,
-                    input::pan,
-                    input::zoom,
-                    input::pick,
+                    input::pan.run_if(overlay_mode),
+                    input::zoom.run_if(overlay_mode),
+                    input::pick.run_if(overlay_mode),
                     fit_to_data,
+                    sync_mode,
                     sync_plot_transform,
                     sync_gutters,
-                    overlay::draw,
+                    overlay::draw.run_if(overlay_mode),
                 )
                     .chain(),
             );
+    }
+}
+
+/// What the plot shows: free squiggles on x/y axes, or stacked trace tracks
+/// on a shared time axis (see [`crate::tracks`]).
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PlotMode {
+    #[default]
+    Overlay,
+    Tracks,
+}
+
+fn overlay_mode(mode: Res<PlotMode>) -> bool {
+    *mode == PlotMode::Overlay
+}
+
+/// Hides overlay squiggles in tracks mode and sets the gutters for the mode.
+fn sync_mode(
+    mode: Res<PlotMode>,
+    mut plot: ResMut<Plot>,
+    mut root: Single<&mut Visibility, With<PlotRoot>>,
+) {
+    let (insets, visibility) = match *mode {
+        PlotMode::Overlay => (Insets::new(0.0, 0.0, AXIS_GUTTER, AXIS_GUTTER), Visibility::Inherited),
+        PlotMode::Tracks => (Insets::new(0.0, 0.0, TRACK_AXIS_HEIGHT, TRACK_LABEL_WIDTH), Visibility::Hidden),
+    };
+    if plot.view.insets != insets {
+        plot.view.insets = insets;
+    }
+    if **root != visibility {
+        **root = visibility;
     }
 }
 

@@ -14,7 +14,7 @@ use squiggle_core::{
     Component, Point, Rgba, Squiggle, Style, Transform, TransformOptions, Wavelet, WaveletOutput,
 };
 
-use crate::plot::{AddSquiggle, FitToData, Plot, RemoveSquiggle, SquiggleModel};
+use crate::plot::{AddSquiggle, FitToData, Plot, PlotMode, RemoveSquiggle, SquiggleModel};
 
 /// Both scenes sample 16 x units at 32 samples per unit. A power of two keeps
 /// the wavelet levels free of padding, and with a Nyquist frequency of 16 the
@@ -462,6 +462,7 @@ fn load_scene(
     mut requests: MessageReader<LoadScene>,
     mut showcase: ResMut<Showcase>,
     mut plot: ResMut<Plot>,
+    mut mode: ResMut<PlotMode>,
     existing: Query<Entity, With<SquiggleModel>>,
     mut add: MessageWriter<AddSquiggle>,
     mut remove: MessageWriter<RemoveSquiggle>,
@@ -473,6 +474,7 @@ fn load_scene(
     for entity in &existing {
         remove.write(RemoveSquiggle(entity));
     }
+    *mode = PlotMode::Overlay;
 
     let built = scene.build();
     for check in &built.checks {

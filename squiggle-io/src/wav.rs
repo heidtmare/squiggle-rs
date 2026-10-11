@@ -4,6 +4,8 @@
 use std::io::Cursor;
 use std::path::Path;
 
+use squiggle_core::SampleBuf;
+
 use crate::{ReadError, Recording, WaveformReader};
 
 pub struct WavReader;
@@ -42,7 +44,7 @@ impl WaveformReader for WavReader {
                 channel: channel as u32,
                 start: None,
                 sample_rate: Some(f64::from(spec.sample_rate)),
-                samples: interleaved.iter().skip(channel).step_by(channels).copied().collect(),
+                samples: SampleBuf::Real(interleaved.iter().skip(channel).step_by(channels).copied().collect()),
                 suggestion: None,
             })
             .collect())
@@ -73,8 +75,8 @@ mod tests {
         let recordings = WavReader.read(Path::new("/data/mic.wav"), &bytes).unwrap();
         assert_eq!(recordings.len(), 2);
         assert_eq!(recordings[0].code, "mic.ch0");
-        assert_eq!(recordings[0].samples, [0.5, 0.0]);
-        assert_eq!(recordings[1].samples, [-1.0, 0.25]);
+        assert_eq!(recordings[0].samples, SampleBuf::Real(vec![0.5, 0.0]));
+        assert_eq!(recordings[1].samples, SampleBuf::Real(vec![-1.0, 0.25]));
         assert_eq!(recordings[1].sample_rate, Some(8000.0));
         assert_eq!(recordings[1].start, None);
     }

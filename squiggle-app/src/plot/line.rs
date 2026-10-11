@@ -89,42 +89,47 @@ impl Material2d for SquiggleLineMaterial {
     }
 }
 
-/// Builds the ribbon for `points` in cartesian space.
+/// Builds the ribbon for `points` in local space.
 ///
 /// Each point becomes two vertices, one per side, carrying its neighbours so
-/// the shader can miter the joints. Returns `None` when there is no line to
-/// draw.
+/// the shader can miter the joints. Non-finite points break the line. Returns
+/// `None` when there is no segment to draw.
 pub fn build_mesh(points: &[Point]) -> Option<Mesh> {
-    if points.len() < 2 {
+    let finite = |p: &Point| p.x.is_finite() && p.y.is_finite();
+    let runs: Vec<&[Point]> = points.split(|p| !finite(p)).filter(|run| run.len() >= 2).collect();
+    let point_count: usize = runs.iter().map(|run| run.len()).sum();
+    if point_count == 0 {
         return None;
     }
 
-    let vertex_count = points.len() * 2;
+    let vertex_count = point_count * 2;
     let mut positions = Vec::with_capacity(vertex_count);
     let mut previous = Vec::with_capacity(vertex_count);
     let mut next = Vec::with_capacity(vertex_count);
     let mut sides = Vec::with_capacity(vertex_count);
+    let mut indices = Vec::with_capacity((point_count - runs.len()) * 6);
 
-    for (index, point) in points.iter().enumerate() {
-        let position = [point.x as f32, point.y as f32, 0.0];
-        // The ends have no neighbour on one side; repeating the point itself
-        // tells the shader to square the line off there.
-        let before = points[index.saturating_sub(1)];
-        let after = points[(index + 1).min(points.len() - 1)];
+    for run in runs {
+        let base = positions.len() as u32;
+        for (index, point) in run.iter().enumerate() {
+            let position = [point.x as f32, point.y as f32, 0.0];
+            // The ends have no neighbour on one side; repeating the point itself
+            // tells the shader to square the line off there.
+            let before = run[index.saturating_sub(1)];
+            let after = run[(index + 1).min(run.len() - 1)];
 
-        for side in [-1.0f32, 1.0] {
-            positions.push(position);
-            previous.push([before.x as f32, before.y as f32]);
-            next.push([after.x as f32, after.y as f32]);
-            sides.push(side);
+            for side in [-1.0f32, 1.0] {
+                positions.push(position);
+                previous.push([before.x as f32, before.y as f32]);
+                next.push([after.x as f32, after.y as f32]);
+                sides.push(side);
+            }
         }
-    }
-
-    // Two triangles bridge each pair of adjacent points.
-    let mut indices = Vec::with_capacity((points.len() - 1) * 6);
-    for segment in 0..points.len() as u32 - 1 {
-        let base = segment * 2;
-        indices.extend_from_slice(&[base, base + 1, base + 2, base + 1, base + 3, base + 2]);
+        // Two triangles bridge each pair of adjacent points.
+        for segment in 0..run.len() as u32 - 1 {
+            let at = base + segment * 2;
+            indices.extend_from_slice(&[at, at + 1, at + 2, at + 1, at + 3, at + 2]);
+        }
     }
 
     let mut mesh = Mesh::new(
@@ -169,6 +174,22 @@ mod tests {
         };
         assert_eq!(indices.len(), 4 * 6);
         assert!(indices.iter().all(|i| (*i as usize) < mesh.count_vertices()));
+    }
+
+    #[test]
+    fn non_finite_points_break_the_line() {
+        let mut pts = points(6);
+        pts[2].y = f64::NAN;
+        // Runs [0, 1] and [3, 4, 5]: three segments, isolated points dropped.
+        let mesh = build_mesh(&pts).expect("two runs");
+        assert_eq!(mesh.count_vertices(), 10);
+        let Some(Indices::U32(indices)) = mesh.indices() else {
+            panic!("expected u32 indices");
+        };
+        assert_eq!(indices.len(), 3 * 6);
+        pts[4].x = f64::INFINITY;
+        assert!(build_mesh(&pts[..3]).is_some());
+        assert!(build_mesh(&[pts[0], Point::new(f64::NAN, 0.0), pts[1]]).is_none());
     }
 
     #[test]

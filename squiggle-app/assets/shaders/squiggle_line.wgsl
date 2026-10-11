@@ -84,9 +84,16 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let miter = vec2(-bisector.y, bisector.x);
     let segment_normal = vec2(-direction_out.y, direction_out.x);
     // Sharper joints need a longer miter to keep the outer edge continuous.
-    let projection = max(abs(dot(miter, segment_normal)), 1.0 / MITER_LIMIT);
+    let projection = abs(dot(miter, segment_normal));
 
-    let offset = miter * (vertex.side * material.half_width / projection);
+    var offset = miter * (vertex.side * material.half_width / max(projection, 1.0 / MITER_LIMIT));
+    // Past the limit the miter runs along the line and the ribbon collapses;
+    // bevel instead, square to the longer neighbouring segment.
+    if (projection < 1.0 / MITER_LIMIT) {
+        let normal_in = vec2(-direction_in.y, direction_in.x);
+        let normal = select(segment_normal, normal_in, incoming_length > outgoing_length);
+        offset = normal * (vertex.side * material.half_width);
+    }
     let pixels = here + offset;
 
     var out: VertexOutput;

@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use squiggle_core::phenomenology::suggest_from_seed_code;
-use squiggle_core::Timestamp;
+use squiggle_core::{SampleBuf, Timestamp};
 
 use crate::{ReadError, Recording, WaveformReader};
 
@@ -67,7 +67,7 @@ impl WaveformReader for CsvReader {
                 channel: channel as u32,
                 start,
                 sample_rate,
-                samples,
+                samples: SampleBuf::Real(samples),
                 suggestion: suggest_from_seed_code(&headers[column]),
             })
             .collect())
@@ -117,9 +117,9 @@ mod tests {
         assert_eq!(recordings.len(), 2);
         assert_eq!(recordings[0].start, Some("2026-10-11T00:00:00Z".parse().unwrap()));
         assert!((recordings[0].sample_rate.unwrap() - 100.0).abs() < 1e-6);
-        assert_eq!(recordings[0].samples, [1.0, 2.0, 3.0]);
+        assert_eq!(recordings[0].samples, SampleBuf::Real(vec![1.0, 2.0, 3.0]));
         assert_eq!(recordings[0].suggestion.as_ref().map(|s| s.phenomenology.as_str()), Some("seismic"));
-        assert!(recordings[1].samples[1].is_nan());
+        assert!(matches!(&recordings[1].samples, SampleBuf::Real(s) if s[1].is_nan()));
         assert_eq!(recordings[1].channel, 1);
         assert_eq!(recordings[1].suggestion, None);
     }

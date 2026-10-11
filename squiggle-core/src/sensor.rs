@@ -1,10 +1,10 @@
 //! Sensors, the traces they record, and where each value came from.
 
 use core::fmt;
-use std::sync::Arc;
 
 use crate::id::Id;
-use crate::phenomenology::PhenomenologyId;
+use crate::phenomenology::{PhenomenologyId, SampleKind};
+use crate::samples::RawLayout;
 use crate::time::Timestamp;
 
 /// Who made a change. The local OS user until accounts exist.
@@ -98,8 +98,11 @@ pub enum TraceSource {
         format: String,
         /// Channel index within the file.
         channel: u32,
-        /// BLAKE3 of the file, hex.
+        /// BLAKE3 of the file and any companion files, hex.
         content_hash: String,
+        /// Analyst-supplied layout for headerless binary files.
+        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+        layout: Option<RawLayout>,
     },
 }
 
@@ -111,7 +114,7 @@ impl TraceSource {
     }
 }
 
-/// Trace metadata, as persisted. Samples are held separately in [`ChunkedSamples`].
+/// Trace metadata, as persisted. Samples are held separately in [`crate::samples::TraceSamples`].
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Trace {
@@ -121,6 +124,8 @@ pub struct Trace {
     pub start: Timestamp,
     pub sample_rate: f64,
     pub len: usize,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub kind: SampleKind,
     pub source: TraceSource,
 }
 
@@ -130,63 +135,9 @@ impl Trace {
     }
 }
 
-/// Append-only samples. Chunks never move or change, so readers can hold them
-/// while a stream appends.
-#[derive(Clone, Debug, Default)]
-pub struct ChunkedSamples {
-    chunks: Vec<Arc<[f32]>>,
-    len: usize,
-}
-
-impl ChunkedSamples {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn from_vec(samples: Vec<f32>) -> Self {
-        let mut chunked = Self::new();
-        chunked.append(samples);
-        chunked
-    }
-
-    pub fn append(&mut self, chunk: impl Into<Arc<[f32]>>) {
-        let chunk = chunk.into();
-        if !chunk.is_empty() {
-            self.len += chunk.len();
-            self.chunks.push(chunk);
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    pub fn chunks(&self) -> &[Arc<[f32]>] {
-        &self.chunks
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = f32> + '_ {
-        self.chunks.iter().flat_map(|chunk| chunk.iter().copied())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn chunks_concatenate_in_order() {
-        let mut samples = ChunkedSamples::from_vec(vec![1.0, 2.0]);
-        samples.append(vec![]);
-        samples.append(vec![3.0]);
-        assert_eq!(samples.len(), 3);
-        assert_eq!(samples.chunks().len(), 2);
-        assert_eq!(samples.iter().collect::<Vec<_>>(), [1.0, 2.0, 3.0]);
-    }
 
     #[test]
     fn clock_correction_applies_offset_and_drift() {
