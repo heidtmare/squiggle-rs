@@ -1,11 +1,15 @@
 //! Project windows: import, sensors, phenomenology registry, errors.
 
+use std::collections::HashMap;
+
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 use squiggle_core::phenomenology::Phase;
 use squiggle_core::sensor::Provenance;
-use squiggle_core::{Change, NumberFormat, Phenomenology, PhenomenologyId, Project, Propagation, Rgba, SampleKind};
+use squiggle_core::{
+    Change, Id, Location, NumberFormat, Phenomenology, PhenomenologyId, Project, Propagation, Rgba, SampleKind,
+};
 
 use crate::workspace::{ImportQueue, SampleState, UNASSIGNED_COLOR, Workspace, WorkspaceRequest};
 
@@ -19,6 +23,17 @@ pub struct ProjectWindows {
     editor: Option<PhenomenologyDraft>,
     bulk_start: String,
     bulk_phenomenology: Option<PhenomenologyId>,
+    /// Latitude, longitude, elevation text being edited, per sensor, and the
+    /// location it was loaded from; reloaded when that changes (e.g. undo).
+    location_drafts: HashMap<Id, ([String; 3], Option<Location>)>,
+}
+
+/// Parses latitude and longitude in degrees and elevation in metres (blank: 0).
+fn parse_location([lat, lon, elevation]: &[String; 3]) -> Result<Location, String> {
+    let number = |text: &str, what: &str| text.trim().parse::<f64>().map_err(|_| format!("{what} must be a number"));
+    let elevation_m = if elevation.trim().is_empty() { 0.0 } else { number(elevation, "elevation")? };
+    let location = Location { latitude: number(lat, "latitude")?, longitude: number(lon, "longitude")?, elevation_m };
+    if location.is_valid() { Ok(location) } else { Err("latitude ±90°, longitude ±180°".to_string()) }
 }
 
 /// What the menu bar needs from the project.
@@ -281,6 +296,8 @@ fn sensors_window(ctx: &egui::Context, workspace: &mut Workspace, windows: &mut 
     }
 
     let mut changes = Vec::new();
+    let mut located: Option<(String, Change)> = None;
+    let drafts = &mut windows.location_drafts;
     egui::Window::new("Sensors").default_width(760.0).open(&mut windows.sensors_open).show(ctx, |ui| {
         let project = &workspace.project;
         if project.sensors().is_empty() {
@@ -303,6 +320,42 @@ fn sensors_window(ctx: &egui::Context, workspace: &mut Workspace, windows: &mut 
                             Provenance::Auto { stage, .. } => format!("auto: {stage}"),
                         };
                         ui.label(egui::RichText::new(format!("v{} · {by}", assignment.version)).weak());
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    let load = || match sensor.location {
+                        Some(l) => ([l.latitude.to_string(), l.longitude.to_string(), l.elevation_m.to_string()], sensor.location),
+                        None => (Default::default(), None),
+                    };
+                    let entry = drafts.entry(sensor.id).or_insert_with(load);
+                    if entry.1 != sensor.location {
+                        *entry = load();
+                    }
+                    let draft = &mut entry.0;
+                    ui.label("Location");
+                    for (text, hint, width) in [(0, "latitude °", 90.0), (1, "longitude °", 90.0), (2, "elevation m", 70.0)] {
+                        ui.add(egui::TextEdit::singleline(&mut draft[text]).hint_text(hint).desired_width(width));
+                    }
+                    let parsed = parse_location(draft);
+                    let unchanged = parsed.as_ref().ok() == sensor.location.as_ref();
+                    if ui.add_enabled(parsed.is_ok() && !unchanged, egui::Button::new("Set")).clicked()
+                        && let Ok(location) = parsed.clone()
+                    {
+                        let change = Change::SetSensorLocation { sensor: sensor.id, location: Some(location) };
+                        located = Some((format!("Locate {}", sensor.code), change));
+                    }
+                    if sensor.location.is_some() && ui.button("Clear").clicked() {
+                        located = Some((format!("Clear location of {}", sensor.code), Change::SetSensorLocation { sensor: sensor.id, location: None }));
+                    }
+                    match (&parsed, sensor.location) {
+                        (Err(why), _) if draft.iter().any(|t| !t.trim().is_empty()) => {
+                            ui.colored_label(WARN_COLOR, why);
+                        }
+                        (_, None) => {
+                            ui.weak("none: not used to locate");
+                        }
+                        _ => {}
                     }
                 });
 
@@ -339,6 +392,9 @@ fn sensors_window(ctx: &egui::Context, workspace: &mut Workspace, windows: &mut 
 
     for change in changes {
         workspace.commit_or_report(change);
+    }
+    if let Some((label, change)) = located {
+        workspace.execute_or_report(label, vec![change]);
     }
 }
 
@@ -629,6 +685,14 @@ fn error_window(ctx: &egui::Context, workspace: &mut Workspace) {
 mod tests {
     use super::*;
     use squiggle_core::Analyst;
+
+    #[test]
+    fn locations_parse_with_optional_elevation() {
+        let text = |a: &str, b: &str, c: &str| [a.to_string(), b.to_string(), c.to_string()];
+        assert_eq!(parse_location(&text("35", "-106.5", "")), Ok(Location { latitude: 35.0, longitude: -106.5, elevation_m: 0.0 }));
+        assert!(parse_location(&text("95", "0", "0")).is_err());
+        assert!(parse_location(&text("x", "0", "0")).is_err());
+    }
 
     #[test]
     fn editing_a_phenomenology_bumps_its_version() {

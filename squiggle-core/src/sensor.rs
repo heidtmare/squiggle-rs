@@ -53,12 +53,19 @@ pub struct Assignment {
     pub provenance: Provenance,
 }
 
+/// WGS84 degrees; elevation above sea level, metres.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Location {
     pub latitude: f64,
     pub longitude: f64,
     pub elevation_m: f64,
+}
+
+impl Location {
+    pub fn is_valid(&self) -> bool {
+        (-90.0..=90.0).contains(&self.latitude) && (-180.0..=180.0).contains(&self.longitude) && self.elevation_m.is_finite()
+    }
 }
 
 /// `true = recorded + offset + drift · (recorded − reference)`.
@@ -124,6 +131,30 @@ pub struct Alignment {
     pub provenance: Provenance,
     /// Automatic alignment leaves a locked offset alone.
     pub locked: bool,
+}
+
+/// An arrival marked on a trace. One per trace and phase.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Pick {
+    pub id: Id,
+    pub trace: Id,
+    /// Onset on the trace's own clock (before clock correction and alignment),
+    /// so the pick moves with its waveform.
+    pub time: Timestamp,
+    /// Phase name from the phenomenology's propagation; empty for a single speed.
+    pub phase: String,
+    /// One standard deviation, seconds.
+    pub uncertainty_s: f64,
+    /// Manual picks are locked against automatic re-picks.
+    pub provenance: Provenance,
+}
+
+impl Pick {
+    /// `P`, or `onset` for an unnamed phase.
+    pub fn phase_label(&self) -> &str {
+        if self.phase.is_empty() { "onset" } else { &self.phase }
+    }
 }
 
 /// Trace metadata, as persisted. Samples are held separately in [`crate::samples::TraceSamples`].

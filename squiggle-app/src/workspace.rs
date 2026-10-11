@@ -10,9 +10,10 @@ use std::sync::Mutex;
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, IoTaskPool, Task, futures::check_ready};
 use bevy::window::FileDragAndDrop;
+use squiggle_core::locate::Source;
 use squiggle_core::{
-    Analyst, Change, Id, Op, PhenomenologyId, Project, RawLayout, Rgba, SampleBuf, Suggestion, Timestamp, Trace,
-    TraceSamples, TraceSource,
+    Analyst, Change, Id, Location, Op, PhenomenologyId, Project, RawLayout, Rgba, SampleBuf, Suggestion, Timestamp,
+    Trace, TraceSamples, TraceSource,
 };
 use squiggle_io::{FileRead, PROJECT_EXTENSION, ProjectStore, ReadError, SqliteStore};
 
@@ -49,8 +50,8 @@ pub enum WorkspaceRequest {
     Import(Vec<PathBuf>),
     /// Decodes headerless files with an analyst-supplied layout.
     ImportRaw(Vec<PathBuf>, RawLayout),
-    /// Replaces the project with the synthetic alignment event.
-    Synthetic,
+    /// Replaces the project with a synthetic event.
+    Synthetic(SyntheticEvent),
     /// Re-issues a request that was held back by the unsaved-project prompt.
     Discard(Box<WorkspaceRequest>),
 }
@@ -58,8 +59,16 @@ pub enum WorkspaceRequest {
 impl WorkspaceRequest {
     /// Requests that replace the current project.
     fn replaces_project(&self) -> bool {
-        matches!(self, Self::New | Self::OpenDialog | Self::Open(_) | Self::Synthetic)
+        matches!(self, Self::New | Self::OpenDialog | Self::Open(_) | Self::Synthetic(_))
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyntheticEvent {
+    /// Known delays within each phenomenology.
+    Alignment,
+    /// Known source, origin time and sensor positions.
+    Located,
 }
 
 pub enum SampleState {
@@ -80,6 +89,8 @@ pub struct Workspace {
     pub confirm_discard: Option<WorkspaceRequest>,
     /// Known event delay per trace, seconds; synthetic data only.
     pub truth: HashMap<Id, f64>,
+    /// Known source and origin time; synthetic data only.
+    pub truth_origin: Option<(Source, Timestamp)>,
     log: Vec<Op>,
     /// Ops a fresh project starts with; more than this and an unsaved project has edits.
     created_ops: usize,
@@ -109,6 +120,7 @@ impl Workspace {
             error: None,
             confirm_discard: None,
             truth: HashMap::new(),
+            truth_origin: None,
             created_ops: log.len(),
             log,
             store: None,
@@ -244,6 +256,7 @@ impl Workspace {
             error: None,
             confirm_discard: None,
             truth: HashMap::new(),
+            truth_origin: None,
             created_ops: log.len(),
             log,
             store: Some(Mutex::new(store)),
@@ -253,17 +266,27 @@ impl Workspace {
         })
     }
 
-    /// A project holding the synthetic event, with its true delays.
-    fn synthetic(analyst: Analyst) -> Result<Self, String> {
+    /// A project holding a synthetic event and its truth.
+    pub fn synthetic(analyst: Analyst, event: SyntheticEvent) -> Result<Self, String> {
         let mut next = Self::new(analyst);
-        next.commit(Change::RenameProject { name: "Synthetic event".to_string() })?;
-        let paths = synthetic::write(&synthetic::directory())?;
+        let dir = synthetic::directory();
+        let (name, paths, phenomenologies): (&str, Vec<PathBuf>, Vec<&str>) = match event {
+            SyntheticEvent::Alignment => {
+                ("Synthetic event", synthetic::write(&dir)?, synthetic::SPECS.iter().map(|s| s.phenomenology).collect())
+            }
+            SyntheticEvent::Located => (
+                "Synthetic located event",
+                synthetic::write_located(&dir.join("located"))?,
+                synthetic::STATIONS.iter().map(|s| s.phenomenology).collect(),
+            ),
+        };
+        next.commit(Change::RenameProject { name: name.to_string() })?;
         let mut queue = ImportQueue::default();
-        for (path, spec) in paths.iter().zip(&synthetic::SPECS) {
+        for (path, phenomenology) in paths.iter().zip(phenomenologies) {
             let read = squiggle_io::read_file(path).map_err(|e| e.to_string())?;
             queue.push_file(read, None, &next.project);
             if let Some(row) = queue.rows.last_mut() {
-                row.phenomenology = Some(PhenomenologyId::new(spec.phenomenology));
+                row.phenomenology = Some(PhenomenologyId::new(phenomenology));
             }
         }
         if !queue.confirm(&mut next) {
@@ -271,6 +294,10 @@ impl Workspace {
         }
         let origin: Timestamp = synthetic::ORIGIN.parse().expect("valid constant");
         next.commit(Change::SetReference { reference: origin })?;
+        if event == SyntheticEvent::Located {
+            next.truth_origin = Some((synthetic::SOURCE, origin.add_seconds(synthetic::ORIGIN_TIME)));
+            return Ok(next);
+        }
         for spec in &synthetic::SPECS {
             let sensor = next.project.sensor_by_code(&spec.code()).map(|s| s.id);
             if let Some(trace) = next.project.traces().iter().find(|t| Some(t.sensor) == sensor) {
@@ -301,6 +328,8 @@ pub struct ImportRow {
     pub rate: String,
     pub phenomenology: Option<PhenomenologyId>,
     pub suggestion: Option<Suggestion>,
+    /// From the file; set on a sensor that has none.
+    pub location: Option<Location>,
     /// Validation failure from the last confirm.
     pub problem: Option<String>,
 }
@@ -360,6 +389,7 @@ impl ImportQueue {
                 rate: recording.sample_rate.map_or_else(String::new, |r| r.to_string()),
                 phenomenology,
                 suggestion: recording.suggestion.clone(),
+                location: recording.location,
                 problem: None,
             });
         }
@@ -408,6 +438,10 @@ impl ImportQueue {
                     id
                 }
             };
+            let unplaced = workspace.project.sensor(sensor).is_some_and(|s| s.location.is_none());
+            if let (true, Some(location)) = (unplaced, row.location) {
+                workspace.commit_or_report(Change::SetSensorLocation { sensor, location: Some(location) });
+            }
             let unassigned = workspace.project.sensor(sensor).is_some_and(|s| s.assignment.is_none());
             if let (true, Some(phenomenology)) = (unassigned, row.phenomenology) {
                 workspace.commit_or_report(Change::AssignPhenomenology { sensor, phenomenology });
@@ -603,7 +637,7 @@ fn handle_requests(
                 queue.raw_layout = *layout;
                 tasks.reads.push(read_files(paths.clone(), Some(*layout)));
             }
-            WorkspaceRequest::Synthetic => match Workspace::synthetic(workspace.analyst.clone()) {
+            WorkspaceRequest::Synthetic(event) => match Workspace::synthetic(workspace.analyst.clone(), *event) {
                 Ok(next) => {
                     workspace.replace(next);
                     queue.cancel();
@@ -705,6 +739,7 @@ mod tests {
             rate: rate.to_string(),
             phenomenology: phenomenology.map(PhenomenologyId::new),
             suggestion: None,
+            location: None,
             problem: None,
         }
     }
@@ -842,11 +877,19 @@ mod tests {
 
     #[test]
     fn the_synthetic_event_loads_with_its_truth() {
-        let workspace = Workspace::synthetic(Analyst("ana".into())).unwrap();
+        let workspace = Workspace::synthetic(Analyst("ana".into()), SyntheticEvent::Alignment).unwrap();
         assert_eq!(workspace.project.traces().len(), synthetic::SPECS.len());
         assert_eq!(workspace.truth.len(), synthetic::SPECS.len());
         assert!(workspace.project.traces().iter().all(|t| workspace.project.trace_phenomenology(t).is_some()));
         assert_eq!(workspace.project.reference, Some(synthetic::ORIGIN.parse().unwrap()));
+    }
+
+    #[test]
+    fn the_located_event_imports_sensor_positions() {
+        let workspace = Workspace::synthetic(Analyst("ana".into()), SyntheticEvent::Located).unwrap();
+        assert_eq!(workspace.project.traces().len(), synthetic::STATIONS.len());
+        assert!(workspace.project.sensors().iter().all(|s| s.location.is_some()));
+        assert!(workspace.truth_origin.is_some());
     }
 
     #[test]

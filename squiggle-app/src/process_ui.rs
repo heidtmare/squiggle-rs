@@ -300,7 +300,7 @@ fn processing_window(ctx: &egui::Context, windows: &mut ProcessWindows, workspac
 }
 
 /// FNV-1a: a short, stable id for an alignment configuration.
-fn config_hash(text: &str) -> String {
+pub(crate) fn config_hash(text: &str) -> String {
     let hash = text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
     format!("{hash:016x}")
 }

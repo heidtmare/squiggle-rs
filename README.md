@@ -21,6 +21,11 @@ them through Fourier and wavelet transforms without leaving the plot.
   rates, reconciled across all pairs by least squares, reviewed before
   applying. Manual shifts by drag (snapping to correlation peaks) or by
   sample. Every edit undoes.
+- **Picking and location.** STA/LTA onsets refined by AIC, manual picks by
+  key, and a grid-search locator over position, depth and origin time that
+  mixes phenomenologies (EMP anchors the origin, slower phases resolve
+  position). Moveout removal and pick alignment line up arrivals across
+  phenomenologies.
 - **Spectrogram strips** per row, two-sided for I/Q.
 - **Independent axis zoom.** Zoom x and y together or separately, anchored on
   the point under the cursor — waveform axes rarely share a unit.
@@ -53,6 +58,7 @@ already compiles dependencies with optimizations in dev profiles.
 | --- | --- |
 | `--project FILE` | Open a `.squiggle` project |
 | `--synthetic` | Start with a synthetic event of known delays (see [Alignment](#alignment)) |
+| `--located` | Start with a synthetic EMP, seismic and infrasound event of known source (see [Picking and location](#picking-and-location)) |
 | `WAVEFORM...` | Import these files (any format below) |
 | `--squiggles N` | Start with `N` demo squiggles |
 | `--samples N` | Samples per demo squiggle |
@@ -74,6 +80,8 @@ one row each, on a shared time axis; it opens when traces are loaded.
 | Waveform / spectrogram / both, FFT size, y scale, I/Q component | Right-click a row |
 | Alignment reference, lock / unlock / reset offset | Right-click a row |
 | Shift a track in time | `Shift` + drag its row (`Alt` disables snapping) |
+| Pick first phase / S at the cursor | `P` / `S` over a row |
+| Remove the nearest pick | `Delete` or `Backspace` over a row; or right-click the row |
 | Nudge selected tracks | `←` / `→` one sample, with `Shift` ten |
 | Frame every trace | **Fit**, or double-click |
 | Order rows | **Rows by** in the toolbar |
@@ -81,8 +89,11 @@ one row each, on a shared time axis; it opens when traces are loaded.
 | Undo / redo | `⌘Z` / `⇧⌘Z` (`Ctrl` elsewhere), or **Edit** |
 
 The gold cursor spans every row; its time is shown on the axis, and its UTC
-time and the pixel size at the top right. A row's third line shows its offset
-(`Δ`, 🔒 when locked) and processing; the reference is marked ★.
+time and the pixel size at the top right. A row's second line shows its
+distance from the saved origin; its third line shows its offset (`Δ`, 🔒 when
+locked) and processing; the reference is marked ★. Picks are solid lines
+(white manual, blue automatic); arrivals predicted from the saved origin are
+dashed green.
 
 | Overlay | Control |
 | --- | --- |
@@ -113,12 +124,13 @@ change.
 | --- | --- |
 | New / open / save as | **File** menu |
 | Import waveforms | **File ▸ Import Waveforms…**, or drop files on the window |
-| Review sensors and traces | **Project ▸ Sensors…** |
+| Review sensors, traces and locations | **Project ▸ Sensors…** |
 | Add or edit phenomenologies | **Project ▸ Phenomenologies…** |
 
 Once saved, every edit is written immediately. Undo and redo append the
-inverse or repeated change to the log; the log is never rewritten. Processing
-and offset edits undo; imports and phenomenology assignments do not yet.
+inverse or repeated change to the log; the log is never rewritten.
+Processing, offsets, picks, sensor locations and the origin undo; imports and
+phenomenology assignments do not yet.
 
 **Import.** Each channel is listed for confirmation: sensor code, start time
 (UTC, ISO 8601), sample rate, phenomenology. Values not found in the file are
@@ -139,9 +151,15 @@ coloured by phenomenology.
 - **miniSEED**: encodings int16, int32, float32, float64, Steim1, Steim2;
   records are merged per channel, gaps become missing samples (drawn as
   breaks), overlaps are dropped. miniSEED 3 is not supported yet.
-- **SAC**: evenly spaced time series, either byte order.
+- **SAC**: evenly spaced time series, either byte order. `stla`/`stlo`/`stel`
+  set the sensor location.
 - **SigMF**: real or complex, any `core:datatype`; select either file of the
   pair. Integer types are scaled to ±1. Both files are hashed.
+  `core:geolocation` sets the sensor location.
+
+A location from the file is set on a sensor that has none. Edit locations
+(latitude, longitude in degrees, elevation in metres) in **Project ▸
+Sensors…**.
 - **Raw binary**: any file no reader recognises. The import dialog asks for
   its layout (number format, byte order, real or I/Q, interleaved channels,
   header bytes, scale); the layout is stored with each trace, and the last
@@ -197,6 +215,67 @@ recording one event with known delays under a strong microseism. Align then
 shows a *vs truth* column. Unfiltered, the microseism dominates and rows stay
 unchecked; after a 1–15 Hz band-pass, delays land within 1.5 ms of truth.
 
+## Picking and location
+
+A pick marks an arrival on a trace: a phase from its phenomenology's
+propagation (`P`, `S`, … or an unnamed onset for a constant speed), a time on
+the trace's own clock (so it moves with clock corrections and offsets), an
+uncertainty and provenance. One per trace and phase. Manual picks lock: an
+automatic re-pick never replaces them.
+
+**Process ▸ Pick…** picks the selected tracks' plotted series (complex traces
+by magnitude), with STA/LTA windows and thresholds per phenomenology:
+
+1. Classic (short window over the long window before it) or recursive
+   STA/LTA on energy; a trigger runs from the *on* ratio until it falls below
+   *off*.
+2. The first (or strongest) trigger is refined by the Akaike information
+   criterion over a window from four STAs before it to one after; the AIC
+   minimum is the onset, and the half-width of its basin within 2 of the
+   minimum is the uncertainty (at least half a sample).
+
+Defaults: seismic 0.3/5 s, infrasound 0.2/3 s, acoustic 0.01/0.5 s, EMP and
+RF 10 µs/1 ms; other phenomenologies 20/400 samples. Results are reviewed,
+then applied as automatic picks of the first phase. Hover a row and press `P`
+or `S` for a manual pick at the cursor (uncertainty: a pixel, at least a
+sample).
+
+**Process ▸ Locate…** uses every included pick whose sensor has a location
+and whose phase has a speed:
+
+- Travel time is a straight ray at the phase speed: great-circle surface
+  distance (spherical Earth) combined with source depth plus sensor elevation.
+  Valid at regional distances.
+- A 41×41 grid over latitude and longitude (±2× the sensor spread, at least
+  10 km) and 11 depths (0 to the depth limit; 0 fixes the source at the
+  surface) is refined eight times around the best node.
+- At each node the origin time is solved in closed form, weighting each pick
+  by `1/σ²`; χ² is the misfit. Precise EMP and RF picks therefore anchor the
+  origin time, and slower phases resolve position.
+
+The result shows position, depth, origin, RMS, χ²/dof, per-pick residuals and
+a map of the first grid's misfit with sensors (white outline: used),
+solution and, for synthetic data, truth. **Save origin** stores it (one per
+project until events exist); rows then show predicted arrivals, can be
+ordered by distance, and Shift+drag snaps to them.
+
+**Align across phenomenologies** (in the Locate window):
+
+- **Remove moveout** shifts every placed trace by minus its first-phase travel
+  time from the saved origin, so arrivals of every phenomenology line up at
+  the origin time.
+- **Align picks to ★ reference** shifts selected tracks so their pick sits on
+  the reference's pick of the same phase.
+
+Both are undoable, automatic and leave locked offsets alone.
+
+`--located` (or **Demo ▸ Synthetic located event**) writes twelve SAC files
+with station coordinates: three EMP sensors (1 MHz, 20 ms captures), six
+seismic stations (50–200 Hz, P and S) and three infrasound sensors (50 Hz)
+recording a 0.5 km deep explosion. Arrivals follow the built-in speeds. With
+default settings every pick lands within a sample of truth, and the location
+is within 3 m, depth 17 m and origin time 1 µs.
+
 ## Transforms
 
 The **Transform** menu turns each selected squiggle into new ones, added to
@@ -247,7 +326,8 @@ squiggle-app/    the Bevy application
   src/tracks.rs      stacked tracks: LOD meshes, time axis, labels, shifting
   src/strips.rs      spectrogram strips
   src/process_ui.rs  filter and align windows
-  src/synthetic.rs   synthetic alignment event
+  src/locate_ui.rs   pick and locate windows, alignment across phenomenologies
+  src/synthetic.rs   synthetic alignment and located events
   src/project_ui.rs  import, sensor and phenomenology windows
   assets/shaders/squiggle_line.wgsl   screen-space polyline expansion
   src/plot/      camera, input, meshing, overlay
@@ -313,10 +393,16 @@ against brute force (one chunk or many) and time-axis ticks. DSP tests check
 Butterworth responses against −3 dB corners, chunked against whole filtering
 and resampling, zero-phase pulses, alias rejection, spectrogram bins, delay
 recovery (known shifts, sub-sample, gaps, noise confidence), the least-squares
-solve, and known delays at mixed rates recovered within one sample. Project
-tests cover locks, reverts and processing validation.
+solve, and known delays at mixed rates recovered within one sample. Picker
+tests check STA/LTA forms (streamed equals whole), triggers, AIC and onsets
+within two samples; locator tests recover sources from exact arrivals, with
+mixed phenomenologies anchored on the fastest. Project tests cover locks,
+reverts, processing validation, picks (per-phase replacement, manual locks,
+clock correction) and sensor locations.
 `squiggle-io` tests each reader on synthesised files (Steim1/2 round trips,
 both SAC byte orders, SigMF pairs, raw layouts), record merging with gaps,
 source chunking, and change detection. `squiggle-app` tests the mesh
 builder's topology, import validation, LOD bucketing, undo/redo through the
-log, the synthetic event and argument parsing.
+log, the synthetic events, manual pick placement, moveout and pick alignment,
+argument parsing, and the M4 self-check: pick and locate the synthetic
+located event within tolerance.

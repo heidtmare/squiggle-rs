@@ -69,6 +69,7 @@ impl WaveformReader for CsvReader {
                 sample_rate,
                 samples: SampleBuf::Real(samples),
                 suggestion: suggest_from_seed_code(&headers[column]),
+                location: None,
             })
             .collect())
     }

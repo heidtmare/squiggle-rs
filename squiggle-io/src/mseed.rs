@@ -70,6 +70,7 @@ impl WaveformReader for MseedReader {
                 let (start, sample_rate, samples) = merge(&list).map_err(|m| error(0, format!("{code}: {m}")))?;
                 Ok(Recording {
                     suggestion: suggest_from_seed_code(&code),
+                    location: None,
                     code,
                     channel: channel as u32,
                     start: Some(start),

@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use squiggle_core::phenomenology::suggest_from_seed_code;
-use squiggle_core::{SampleBuf, Timestamp};
+use squiggle_core::{Location, SampleBuf, Timestamp};
 
 use crate::{ReadError, Recording, WaveformReader};
 
@@ -15,6 +15,9 @@ const ITIME: i32 = 1;
 // Word indices (floats 0..70, ints 70..110) and string byte offsets.
 const DELTA: usize = 0;
 const B: usize = 5;
+const STLA: usize = 31;
+const STLO: usize = 32;
+const STEL: usize = 33;
 const NZYEAR: usize = 70;
 const NVHDR: usize = 76;
 const NPTS: usize = 79;
@@ -76,6 +79,14 @@ impl WaveformReader for SacReader {
                 .add_seconds(b)
         });
 
+        let defined = |i: usize| Some(f64::from(float(i))).filter(|v| *v != f64::from(UNDEFINED));
+        let position = match (defined(STLA), defined(STLO)) {
+            (Some(latitude), Some(longitude)) => {
+                Some(Location { latitude, longitude, elevation_m: defined(STEL).unwrap_or(0.0) }).filter(Location::is_valid)
+            }
+            _ => None,
+        };
+
         let (network, station, location, component) = (text(KNETWK), text(KSTNM), text(KHOLE), text(KCMPNM));
         let code = if station.is_empty() {
             path.file_stem().map_or_else(|| "sac".into(), |s| s.to_string_lossy().into_owned())
@@ -89,13 +100,20 @@ impl WaveformReader for SacReader {
             start,
             sample_rate: Some(1.0 / delta),
             samples: SampleBuf::Real(samples),
+            location: position,
         }])
     }
 }
 
 /// A little-endian SAC file of an evenly spaced series. Codes longer than 8
 /// characters are truncated, as the format requires.
-pub fn encode(samples: &[f32], start: Timestamp, rate: f64, [network, station, location, component]: [&str; 4]) -> Vec<u8> {
+pub fn encode(
+    samples: &[f32],
+    start: Timestamp,
+    rate: f64,
+    [network, station, location, component]: [&str; 4],
+    position: Option<Location>,
+) -> Vec<u8> {
     let mut words = [0u32; 110];
     for (i, w) in words.iter_mut().enumerate() {
         *w = if i < 70 { (UNDEFINED as f32).to_bits() } else { UNDEFINED as u32 };
@@ -105,6 +123,11 @@ pub fn encode(samples: &[f32], start: Timestamp, rate: f64, [network, station, l
     words[B] = (frac as f32).to_bits();
     for (i, v) in [year as i32, day as i32, hour as i32, minute as i32, second as i32, 0].into_iter().enumerate() {
         words[NZYEAR + i] = v as u32;
+    }
+    if let Some(p) = position {
+        words[STLA] = (p.latitude as f32).to_bits();
+        words[STLO] = (p.longitude as f32).to_bits();
+        words[STEL] = (p.elevation_m as f32).to_bits();
     }
     words[NVHDR] = 6;
     words[NPTS] = samples.len() as u32;
@@ -191,9 +214,14 @@ pub(crate) mod tests {
     #[test]
     fn encoded_files_read_back() {
         let start: Timestamp = "2026-01-01T00:00:09.63Z".parse().unwrap();
-        let bytes = encode(&[1.0, 2.0], start, 40.0, ["SY", "STA02", "", "BHZ"]);
+        let at = Location { latitude: 35.1, longitude: -106.6, elevation_m: 1600.0 };
+        let bytes = encode(&[1.0, 2.0], start, 40.0, ["SY", "STA02", "", "BHZ"], Some(at));
         let r = &SacReader.read(Path::new("x.sac"), &bytes).unwrap()[0];
         assert_eq!(r.code, "SY.STA02..BHZ");
+        let read = r.location.unwrap();
+        assert!((read.latitude - 35.1).abs() < 1e-5 && (read.longitude + 106.6).abs() < 1e-5 && read.elevation_m == 1600.0);
+        let bytes = encode(&[1.0], start, 40.0, ["SY", "STA02", "", "BHZ"], None);
+        assert_eq!(SacReader.read(Path::new("x.sac"), &bytes).unwrap()[0].location, None);
         assert!((r.start.unwrap().seconds_since(start)).abs() < 1e-7);
         assert!((r.sample_rate.unwrap() - 40.0).abs() < 1e-4);
     }

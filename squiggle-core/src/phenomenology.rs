@@ -73,6 +73,29 @@ impl Propagation {
             Self::Unknown => "Unknown",
         }
     }
+
+    /// Named phases and speeds; a constant speed is one unnamed phase.
+    pub fn phases(&self) -> Vec<(&str, f64)> {
+        match self {
+            Self::Constant { speed_m_s } => vec![("", *speed_m_s)],
+            Self::Phases(phases) => phases.iter().map(|p| (p.name.as_str(), p.speed_m_s)).collect(),
+            Self::Unknown => Vec::new(),
+        }
+    }
+
+    /// Speed of `phase`; an empty name means the first (fastest listed) phase.
+    pub fn speed(&self, phase: &str) -> Option<f64> {
+        let phases = self.phases();
+        if phase.is_empty() {
+            return phases.first().map(|p| p.1);
+        }
+        phases.iter().find(|p| p.0 == phase).map(|p| p.1)
+    }
+
+    /// Name automatic picks carry: the first phase.
+    pub fn first_phase(&self) -> Option<&str> {
+        self.phases().first().map(|p| p.0)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -202,6 +225,16 @@ mod tests {
         assert_eq!(id("HNE").as_deref(), Some("seismic"));
         assert_eq!(id("IM.I53H1..BDF").as_deref(), Some("infrasound"));
         assert_eq!(id("EDH").as_deref(), Some("acoustic"));
+    }
+
+    #[test]
+    fn phases_resolve_by_name() {
+        let seismic = &builtins()[0].propagation;
+        assert_eq!(seismic.speed("S"), Some(3500.0));
+        assert_eq!(seismic.speed(""), Some(6000.0));
+        assert_eq!(seismic.speed("Pn"), None);
+        assert_eq!(Propagation::Constant { speed_m_s: 340.0 }.speed(""), Some(340.0));
+        assert_eq!(Propagation::Unknown.first_phase(), None);
     }
 
     #[test]

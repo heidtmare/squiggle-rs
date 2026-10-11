@@ -7,7 +7,8 @@
 //!
 //! The plotted series is the trace's processed samples (detrend, taper,
 //! filter) unless raw display is on. Rows sit at their aligned start; Shift+drag
-//! and the arrow keys shift them, as undoable commands.
+//! and the arrow keys shift them, as undoable commands. Picks and arrivals
+//! predicted from the saved origin are drawn on each row and move with it.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -16,10 +17,11 @@ use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures::check_ready};
 use bevy_egui::{EguiContexts, egui};
 use squiggle_core::dsp::{AlignSettings, Channel, candidates};
+use squiggle_core::locate::{slant_distance, travel_time};
 use squiggle_core::sensor::Provenance;
 use squiggle_core::timeline::format_duration;
 use squiggle_core::{
-    Alignment, Change, ChunkedSamples, Envelope, Id, IqComponent, LagMethod, MinMax, PhenomenologyId, Point,
+    Alignment, Change, ChunkedSamples, Envelope, Id, IqComponent, LagMethod, MinMax, PhenomenologyId, Pick, Point,
     Processing, Rgba, SampleKind, Squiggle, Style, TimeView, Timestamp, TraceSamples,
 };
 
@@ -52,6 +54,9 @@ const AXIS_COLOR: egui::Color32 = egui::Color32::from_gray(200);
 const CURSOR_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 215, 0);
 const SELECTED_FILL: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 60, 60, 120);
 const SHIFT_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 140, 60);
+const MANUAL_PICK_COLOR: egui::Color32 = egui::Color32::WHITE;
+const AUTO_PICK_COLOR: egui::Color32 = egui::Color32::from_rgb(100, 180, 255);
+const PREDICTED_COLOR: egui::Color32 = egui::Color32::from_rgb(120, 220, 120);
 
 pub struct TracksPlugin;
 
@@ -82,16 +87,22 @@ pub enum RowOrder {
     Phenomenology,
     Sensor,
     Start,
+    /// From the saved origin.
+    Distance,
+    /// First pick.
+    Arrival,
 }
 
 impl RowOrder {
-    pub const ALL: [Self; 3] = [Self::Phenomenology, Self::Sensor, Self::Start];
+    pub const ALL: [Self; 5] = [Self::Phenomenology, Self::Sensor, Self::Start, Self::Distance, Self::Arrival];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Phenomenology => "Phenomenology",
             Self::Sensor => "Sensor",
             Self::Start => "Start time",
+            Self::Distance => "Distance from origin",
+            Self::Arrival => "First pick",
         }
     }
 }
@@ -185,9 +196,28 @@ struct ShiftDrag {
     entity: Entity,
     /// Unsnapped shift, seconds.
     raw: f64,
-    /// Shifts that align with the reference, with their correlation.
-    snaps: Vec<(f64, f64)>,
-    snapped: Option<f64>,
+    /// Shifts that align with the reference or the origin, and why.
+    snaps: Vec<(f64, String)>,
+    snapped: Option<String>,
+}
+
+/// A pick as drawn on its row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrackPick {
+    pub id: Id,
+    pub phase: String,
+    /// Clock-corrected, seconds from the project reference; the row's offset is added when drawn.
+    pub at: f64,
+    pub manual: bool,
+}
+
+/// An arrival predicted from the saved origin.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Predicted {
+    pub phase: String,
+    /// Seconds from the project reference, before the row's offset.
+    pub at: f64,
+    pub travel: f64,
 }
 
 /// A trace's plotted series: processed real samples, or one component of
@@ -252,6 +282,10 @@ pub struct Track {
     pub preview: f64,
     pub display: RowDisplay,
     pub nfft: usize,
+    pub picks: Vec<TrackPick>,
+    pub predicted: Vec<Predicted>,
+    /// Slant distance from the saved origin, metres.
+    pub distance_m: Option<f64>,
     pub rate: f64,
     pub len: usize,
     pub kind: SampleKind,
@@ -274,6 +308,16 @@ impl Track {
 
     pub fn end(&self) -> f64 {
         self.drawn_start() + self.len as f64 / self.rate
+    }
+
+    /// Where a corrected time on this trace is drawn.
+    pub fn drawn(&self, at: f64) -> f64 {
+        at + self.offset + self.preview
+    }
+
+    /// Earliest pick, as drawn.
+    pub fn first_pick(&self) -> Option<f64> {
+        self.picks.iter().map(|p| self.drawn(p.at)).reduce(f64::min)
     }
 
     /// Processing the series should carry.
@@ -343,6 +387,9 @@ struct Described {
     offset: f64,
     locked: bool,
     processing: Processing,
+    picks: Vec<TrackPick>,
+    predicted: Vec<Predicted>,
+    distance_m: Option<f64>,
 }
 
 /// Spawns, updates and despawns tracks to match the workspace's loaded traces.
@@ -366,7 +413,28 @@ fn sync_tracks(
     let describe = |trace: &squiggle_core::Trace| {
         let reference = project.reference.unwrap_or(trace.start);
         let phenomenology = project.trace_phenomenology(trace);
+        let picks = project
+            .trace_picks(trace.id)
+            .map(|p| TrackPick {
+                id: p.id,
+                phase: p.phase.clone(),
+                at: project.correct(trace, p.time).seconds_since(reference),
+                manual: p.provenance.is_manual(),
+            })
+            .collect();
+        let location = project.sensor(trace.sensor).and_then(|s| s.location);
+        let (mut predicted, mut distance_m) = (Vec::new(), None);
+        if let (Some(origin), Some(location), Some(phenomenology)) = (&project.origin, location, phenomenology) {
+            distance_m = Some(slant_distance(origin.source(), &location));
+            for (phase, speed) in phenomenology.propagation.phases() {
+                let travel = travel_time(origin.source(), &location, speed);
+                predicted.push(Predicted { phase: phase.to_string(), at: origin.time.seconds_since(reference) + travel, travel });
+            }
+        }
         Described {
+            picks,
+            predicted,
+            distance_m,
             code: project.sensor(trace.sensor).map_or("?", |s| s.code.as_str()).to_string(),
             phenomenology: phenomenology.map(|p| p.name.clone()),
             phenomenology_id: phenomenology.map(|p| p.id.clone()),
@@ -393,6 +461,9 @@ fn sync_tracks(
                 track.offset = d.offset;
                 track.locked = d.locked;
                 track.processing = d.processing;
+                track.picks = d.picks;
+                track.predicted = d.predicted;
+                track.distance_m = d.distance_m;
                 if dragging != Some(entity) {
                     track.preview = 0.0;
                 }
@@ -429,6 +500,9 @@ fn sync_tracks(
                 preview: 0.0,
                 display: RowDisplay::default(),
                 nfft: 256,
+                picks: d.picks,
+                predicted: d.predicted,
+                distance_m: d.distance_m,
                 rate: trace.sample_rate,
                 len: samples.len(),
                 kind: samples.kind(),
@@ -502,6 +576,15 @@ fn layout_rows(plot: Res<Plot>, mode: Res<PlotMode>, mut view: ResMut<TrackView>
         RowOrder::Start => {
             rows.sort_by(|a, b| a.drawn_start().total_cmp(&b.drawn_start()).then_with(|| a.code.cmp(&b.code)))
         }
+        // Rows without a value go last.
+        RowOrder::Distance => rows.sort_by(|a, b| {
+            let key = |t: &Track| t.distance_m.unwrap_or(f64::INFINITY);
+            key(a).total_cmp(&key(b)).then_with(|| a.code.cmp(&b.code))
+        }),
+        RowOrder::Arrival => rows.sort_by(|a, b| {
+            let key = |t: &Track| t.first_pick().unwrap_or(f64::INFINITY);
+            key(a).total_cmp(&key(b)).then_with(|| a.code.cmp(&b.code))
+        }),
     }
 
     let area = &plot.view;
@@ -635,6 +718,42 @@ pub fn shift_change(workspace: &Workspace, trace: Id, offset_s: f64) -> Change {
     Change::SetAlignment { trace, alignment: Some(alignment), revert: false }
 }
 
+/// A manual pick of `phase` on `track` where it is drawn at `at` seconds,
+/// replacing any pick of that phase. `None` while the trace is missing.
+fn manual_pick(workspace: &Workspace, track: &Track, phase: &str, at: f64, uncertainty_s: f64) -> Option<Change> {
+    let project = &workspace.project;
+    let trace = project.trace(track.trace)?;
+    let reference = project.reference.unwrap_or(trace.start);
+    // Drawn = corrected + offset; recorded = corrected − the trace's clock correction.
+    let corrected = reference.add_seconds(at - track.offset);
+    let correction = project.corrected_start(trace).seconds_since(trace.start);
+    let id = project.trace_picks(trace.id).find(|p| p.phase == phase).map_or_else(Id::generate, |p| p.id);
+    let pick = Pick {
+        id,
+        trace: trace.id,
+        time: corrected.add_seconds(-correction),
+        phase: phase.to_string(),
+        uncertainty_s,
+        provenance: manual(workspace),
+    };
+    Some(Change::SetPick { pick, revert: false })
+}
+
+/// Phase a key places on `track`: `P` the first phase, `S` the phase named S.
+fn key_phase(workspace: &Workspace, track: &Track, key: egui::Key) -> Option<String> {
+    let project = &workspace.project;
+    let propagation = &project.trace_phenomenology(project.trace(track.trace)?)?.propagation;
+    match key {
+        egui::Key::P => Some(propagation.first_phase().unwrap_or("").to_string()),
+        egui::Key::S => propagation.speed("S").map(|_| "S".to_string()),
+        _ => None,
+    }
+}
+
+fn phase_label(phase: &str) -> &str {
+    if phase.is_empty() { "onset" } else { phase }
+}
+
 /// Per-track options, shown from a right-click on its row or label.
 fn track_menu(ui: &mut egui::Ui, track: &mut Track, view: &mut TrackView, workspace: &mut Workspace, width: f64) {
     ui.label(egui::RichText::new(&track.code).strong());
@@ -694,6 +813,18 @@ fn track_menu(ui: &mut egui::Ui, track: &mut Track, view: &mut TrackView, worksp
             ui.close();
         }
     }
+    if !track.picks.is_empty() {
+        ui.separator();
+        ui.label("Picks");
+        for pick in &track.picks {
+            let kind = if pick.manual { "manual" } else { "auto" };
+            if ui.button(format!("Remove {} ({kind})", phase_label(&pick.phase))).clicked() {
+                let change = Change::RemovePick { pick: pick.id };
+                workspace.execute_or_report(format!("Remove pick on {}", track.code), vec![change]);
+                ui.close();
+            }
+        }
+    }
     ui.separator();
     if ui.button("Fit time to this trace").clicked() {
         view.time.fit(track.drawn_start(), track.end(), width);
@@ -701,20 +832,39 @@ fn track_menu(ui: &mut egui::Ui, track: &mut Track, view: &mut TrackView, worksp
     }
 }
 
-/// Shifts that line `entity` up with the reference over the visible window.
-fn snap_targets(view: &TrackView, tracks: &Query<(Entity, &mut Track, Has<SeriesTask>)>, entity: Entity, width: f64) -> Vec<(f64, f64)> {
-    let Some(reference) = view.reference else {
-        return Vec::new();
-    };
+/// Shifts that remove `entity`'s moveout from the saved origin, put its picks
+/// on the reference's, or line it up with the reference by correlation.
+fn snap_targets(view: &TrackView, tracks: &Query<(Entity, &mut Track, Has<SeriesTask>)>, entity: Entity, width: f64) -> Vec<(f64, String)> {
     let Ok((_, dragged, _)) = tracks.get(entity) else {
         return Vec::new();
     };
-    let Some((_, anchor, _)) = tracks.iter().find(|(_, t, _)| t.trace == reference) else {
-        return Vec::new();
+    // Moveout: the arrival drawn at the origin time.
+    let mut snaps: Vec<(f64, String)> =
+        dragged.predicted.iter().map(|p| (-p.travel - dragged.offset, format!("moveout {}", phase_label(&p.phase)))).collect();
+    let Some(reference) = view.reference else {
+        return snaps;
     };
-    if anchor.trace == dragged.trace || anchor.phenomenology_id.is_none() || anchor.phenomenology_id != dragged.phenomenology_id {
-        return Vec::new();
+    let Some((_, anchor, _)) = tracks.iter().find(|(_, t, _)| t.trace == reference) else {
+        return snaps;
+    };
+    if anchor.trace == dragged.trace {
+        return snaps;
     }
+    for pick in &dragged.picks {
+        if let Some(target) = anchor.picks.iter().find(|p| p.phase == pick.phase) {
+            let shift = anchor.drawn(target.at) - (pick.at + dragged.offset);
+            snaps.push((shift, format!("on ★ {}", phase_label(&pick.phase))));
+        }
+    }
+    if anchor.phenomenology_id.is_none() || anchor.phenomenology_id != dragged.phenomenology_id {
+        return snaps;
+    }
+    snaps.extend(correlation_snaps(view, anchor, dragged, width));
+    snaps
+}
+
+/// Correlation peaks of `dragged` against `anchor` over the visible window.
+fn correlation_snaps(view: &TrackView, anchor: &Track, dragged: &Track, width: f64) -> Vec<(f64, String)> {
     let from = view.time.start.max(anchor.drawn_start());
     let to = view.time.end(width).min(anchor.end());
     if to <= from {
@@ -731,7 +881,7 @@ fn snap_targets(view: &TrackView, tracks: &Query<(Entity, &mut Track, Has<Series
     let settings = AlignSettings { method: LagMethod::CrossCorrelation, from, to, max_lag_s, max_samples: SNAP_SAMPLES };
     let a = Channel { values: &a, rate: anchor.rate, start: a_start };
     let b = Channel { values: &b, rate: dragged.rate, start: b_start };
-    candidates(&a, &b, &settings, SNAP_MIN).into_iter().map(|(lag, r)| (-lag, r)).collect()
+    candidates(&a, &b, &settings, SNAP_MIN).into_iter().map(|(lag, r)| (-lag, format!("r = {r:.2}"))).collect()
 }
 
 /// Labels, time axis, cursor and mouse handling for the tracks view.
@@ -809,6 +959,9 @@ pub fn tracks_ui(
         if track.kind == SampleKind::Complex {
             detail.push_str(&format!(" · IQ {}", track.component.label()));
         }
+        if let Some(distance) = track.distance_m {
+            detail.push_str(&format!(" · {:.1} km", distance / 1e3));
+        }
         if building || track.series.is_none() {
             detail.push_str(" · building…");
         }
@@ -841,6 +994,28 @@ pub fn tracks_ui(
                 let color = if track.preview != 0.0 { SHIFT_COLOR } else { egui::Color32::from_gray(160) };
                 clip.text(egui::pos2(x, line_y), egui::Align2::LEFT_TOP, state.join(" · "), small.clone(), color);
             }
+        }
+    }
+
+    // Predicted arrivals (dashed) and picks (white manual, blue automatic).
+    let marks = painter.with_clip_rect(area);
+    for (entity, y) in &rows {
+        let Ok((_, track, _)) = tracks.get(*entity) else {
+            continue;
+        };
+        let x_of = |t: f64| area.min.x + view.time.x_of(track.drawn(t)) as f32;
+        for p in &track.predicted {
+            let x = x_of(p.at);
+            let stroke = egui::Stroke::new(1.0, PREDICTED_COLOR);
+            marks.add(egui::Shape::dashed_line(&[egui::pos2(x, y.min), egui::pos2(x, y.max)], stroke, 4.0, 3.0));
+            let label = format!("{} pred", phase_label(&p.phase));
+            marks.text(egui::pos2(x + 2.0, y.max - 2.0), egui::Align2::LEFT_BOTTOM, label, mono.clone(), PREDICTED_COLOR);
+        }
+        for p in &track.picks {
+            let x = x_of(p.at);
+            let color = if p.manual { MANUAL_PICK_COLOR } else { AUTO_PICK_COLOR };
+            marks.vline(x, *y, egui::Stroke::new(1.5, color));
+            marks.text(egui::pos2(x + 2.0, y.min + 2.0), egui::Align2::LEFT_TOP, phase_label(&p.phase), mono.clone(), color);
         }
     }
 
@@ -905,7 +1080,7 @@ pub fn tracks_ui(
                 let snap = (!alt_held)
                     .then(|| drag.snaps.iter().find(|(s, _)| ((s - drag.raw) * px_per_s).abs() < SNAP_PX))
                     .flatten();
-                drag.snapped = snap.map(|(_, r)| *r);
+                drag.snapped = snap.map(|(_, why)| why.clone());
                 let preview = snap.map_or(drag.raw, |(s, _)| *s);
                 if let Ok((_, mut track, _)) = tracks.get_mut(drag.entity) {
                     track.preview = preview;
@@ -945,6 +1120,37 @@ pub fn tracks_ui(
         }
     }
 
+    // Over a row: P / S place a manual pick at the cursor, Delete removes the nearest.
+    if view.drag.is_none()
+        && !ctx.egui_wants_keyboard_input()
+        && let Some(pointer) = pointer.filter(|p| area.contains(*p))
+        && let Some(entity) = row_at(pointer.y)
+        && let Ok((_, track, _)) = tracks.get(entity)
+    {
+        let at = view.time.time_at(f64::from(pointer.x - area.min.x));
+        let px_per_s = view.time.px_per_s;
+        let (key, delete) = ctx.input(|i| {
+            let key = [egui::Key::P, egui::Key::S].into_iter().find(|k| i.key_pressed(*k) && !i.modifiers.command);
+            (key, i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete))
+        });
+        if let Some(phase) = key.and_then(|k| key_phase(&workspace, track, k)) {
+            // A pixel at this zoom, but no finer than a sample.
+            let uncertainty_s = (1.0 / track.rate).max(1.0 / px_per_s);
+            if let Some(change) = manual_pick(&workspace, track, &phase, at, uncertainty_s) {
+                workspace.execute_or_report(format!("Pick {} on {}", phase_label(&phase), track.code), vec![change]);
+            }
+        }
+        let nearest = track
+            .picks
+            .iter()
+            .map(|p| (p.id, ((track.drawn(p.at) - at) * px_per_s).abs()))
+            .filter(|(_, d)| *d < SNAP_PX)
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        if let (true, Some((pick, _))) = (delete, nearest) {
+            workspace.execute_or_report(format!("Remove pick on {}", track.code), vec![Change::RemovePick { pick }]);
+        }
+    }
+
     if response.double_clicked() {
         view.fit_requested = true;
     } else if response.clicked()
@@ -971,8 +1177,8 @@ pub fn tracks_ui(
         && let Ok((_, track, _)) = tracks.get(drag.entity)
     {
         let mut text = format!("Δ{} s", signed(track.offset + track.preview));
-        if let Some(r) = drag.snapped {
-            text.push_str(&format!("  snap r = {r:.2}"));
+        if let Some(why) = &drag.snapped {
+            text.push_str(&format!("  snap {why}"));
         }
         let galley = painter.layout_no_wrap(text, mono.clone(), SHIFT_COLOR);
         let rect = egui::Rect::from_min_size(pointer + egui::vec2(12.0, -18.0), galley.size()).expand(3.0);
@@ -1052,6 +1258,9 @@ mod tests {
             preview: 0.0,
             display: RowDisplay::default(),
             nfft: 256,
+            picks: Vec::new(),
+            predicted: Vec::new(),
+            distance_m: None,
             rate,
             len,
             kind: SampleKind::Real,
@@ -1112,6 +1321,33 @@ mod tests {
         t.preview = 1.0;
         assert_eq!(t.indices(11.0, 12.0), (0, 101));
         assert_eq!(t.end(), 21.0);
+    }
+
+    #[test]
+    fn manual_picks_land_where_drawn() {
+        use crate::workspace::SyntheticEvent;
+        use squiggle_core::Analyst;
+        use squiggle_core::sensor::ClockCorrection;
+
+        let mut workspace = Workspace::synthetic(Analyst("ana".into()), SyntheticEvent::Located).unwrap();
+        let trace = workspace.project.traces()[3].clone();
+        let clock = ClockCorrection { offset_s: 0.2, drift_ppm: 0.0 };
+        let changes = vec![shift_change(&workspace, trace.id, 0.75), Change::SetClockCorrection { sensor: trace.sensor, clock }];
+        workspace.execute("setup", changes).unwrap();
+        let mut t = track(100.0, 1000);
+        (t.trace, t.offset) = (trace.id, 0.75);
+        let change = manual_pick(&workspace, &t, "P", 12.5, 0.01).unwrap();
+        workspace.execute("pick", vec![change]).unwrap();
+
+        let project = &workspace.project;
+        let pick = &project.picks()[0];
+        let corrected = project.pick_time(pick).unwrap().seconds_since(project.reference.unwrap());
+        assert!((t.drawn(corrected) - 12.5).abs() < 1e-9, "{corrected}");
+        assert!(pick.provenance.is_manual());
+        // A second P replaces the first.
+        let again = manual_pick(&workspace, &t, "P", 13.0, 0.01).unwrap();
+        workspace.execute("again", vec![again]).unwrap();
+        assert_eq!(workspace.project.picks().len(), 1);
     }
 
     #[test]
