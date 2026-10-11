@@ -38,6 +38,8 @@ already compiles dependencies with optimizations in dev profiles.
 
 | Flag | Effect |
 | --- | --- |
+| `--project FILE` | Open a `.squiggle` project |
+| `WAVEFORM...` | Import these WAV/CSV files |
 | `--squiggles N` | Start with `N` demo squiggles |
 | `--samples N` | Samples per demo squiggle |
 | `--demo fourier\|wavelet` | Load a transform demo at startup |
@@ -61,6 +63,41 @@ already compiles dependencies with optimizations in dev profiles.
 Zoom is multiplicative, so each scroll notch changes the scale by the same
 ratio at every magnification. When a squiggle is selected, sample dots closer
 than six pixels apart are thinned so dense data stays readable.
+
+## Projects
+
+A project (`.squiggle`, SQLite, format `heidtmare.squiggle.project/1`) holds
+sensors, their phenomenology assignments, and traces. It stores an
+append-only op log, not state: opening a project replays the log. Samples
+stay in their source files, which are hashed on import and refused if they
+change.
+
+| Action | Control |
+| --- | --- |
+| New / open / save as | **File** menu |
+| Import waveforms | **File ▸ Import Waveforms…**, or drop files on the window |
+| Review sensors and traces | **Project ▸ Sensors…** |
+| Add or edit phenomenologies | **Project ▸ Phenomenologies…** |
+
+Once saved, every edit is written immediately.
+
+**Import.** Each channel is listed for confirmation: sensor code, start time
+(UTC, ISO 8601), sample rate, phenomenology. Values not found in the file are
+flagged. A sensor already in the project keeps its assignment; otherwise a
+suggestion (from a SEED channel code) is pre-selected and marked. Traces plot
+in seconds from the project reference (earliest start), coloured by
+phenomenology.
+
+| Format | Start | Rate | Sensor code |
+| --- | --- | --- | --- |
+| WAV | supplied (defaults to file mtime) | header | file stem, `.chN` per channel |
+| CSV | ISO `time` column, else supplied | `time`/`t`/`timestamp`/`seconds` column, else supplied | column header |
+
+**Phenomenology.** Built-ins: seismic, acoustic, infrasound, RF, EMP. Each
+has quantity, units, sample kind, propagation (constant speed, phases, or
+unknown) and colour. Edits create a new version; assignments record the
+version and the analyst. Sensors without one are plotted grey and refused by
+**Transform**.
 
 ## Transforms
 
@@ -105,8 +142,11 @@ cargo run -p squiggle-app --release -- --demo fourier --screenshot fourier.png
 ### Layout
 
 ```
-squiggle-core/   model, coordinate math and transforms, no dependencies
+squiggle-core/   model, project op log, time, transforms; no dependencies (optional serde)
+squiggle-io/     WAV/CSV readers, SQLite project store
 squiggle-app/    the Bevy application
+  src/workspace.rs   open project, async file I/O, trace squiggles
+  src/project_ui.rs  import, sensor and phenomenology windows
   assets/shaders/squiggle_line.wgsl   screen-space polyline expansion
   src/plot/      camera, input, meshing, overlay
   src/ui.rs      menu bar, toolbar, sidebar (egui)

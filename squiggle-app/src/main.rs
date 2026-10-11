@@ -6,8 +6,10 @@
 
 mod demo;
 mod plot;
+mod project_ui;
 mod showcase;
 mod ui;
+mod workspace;
 
 use bevy::prelude::*;
 use bevy::window::WindowResolution;
@@ -28,6 +30,7 @@ fn main() -> AppExit {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Squiggle".to_string(),
+                name: Some(squiggle_io::APP_ID.to_string()),
                 resolution: WindowResolution::new(1152, 648),
                 ..default()
             }),
@@ -36,6 +39,7 @@ fn main() -> AppExit {
         .add_plugins(EguiPlugin::default())
         .add_plugins(plot::PlotPlugin)
         .add_plugins(ui::UiPlugin)
+        .add_plugins(workspace::WorkspacePlugin)
         .add_plugins(showcase::ShowcasePlugin)
         .insert_resource(options)
         .add_systems(Startup, demo::seed)
