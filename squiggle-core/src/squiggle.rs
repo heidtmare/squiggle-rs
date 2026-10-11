@@ -1,6 +1,7 @@
 //! The plot's data model: points, the polylines they form, and how to draw them.
 
 use crate::color::Rgba;
+use crate::transform::Spectrum;
 use crate::view::{Coord, PlotView};
 
 /// A single sample. `z` and `m` are optional measures carried alongside the
@@ -107,6 +108,9 @@ pub struct Squiggle {
     pub selected: bool,
     points: Vec<Point>,
     bounds: Option<Bounds>,
+    /// Set when the squiggle is the output of a Fourier transform, so the
+    /// inverse can work from the complex values rather than the plotted ones.
+    spectrum: Option<Spectrum>,
 }
 
 impl Squiggle {
@@ -117,6 +121,7 @@ impl Squiggle {
             selected: false,
             points: Vec::new(),
             bounds: None,
+            spectrum: None,
         }
     }
 
@@ -129,6 +134,18 @@ impl Squiggle {
     pub fn with_style(mut self, style: Style) -> Self {
         self.style = style;
         self
+    }
+
+    /// Attaches the spectrum these points were plotted from.
+    pub fn with_spectrum(mut self, spectrum: Spectrum) -> Self {
+        self.spectrum = Some(spectrum);
+        self
+    }
+
+    /// The spectrum behind a transformed squiggle. Editing the points drops
+    /// it, since it would no longer describe them.
+    pub fn spectrum(&self) -> Option<&Spectrum> {
+        self.spectrum.as_ref()
     }
 
     pub fn points(&self) -> &[Point] {
@@ -151,6 +168,9 @@ impl Squiggle {
     pub fn extend(&mut self, points: impl IntoIterator<Item = Point>) {
         let before = self.points.len();
         self.points.extend(points);
+        if self.points.len() > before {
+            self.spectrum = None;
+        }
         // Growing only ever widens the extent, so merge instead of rescanning.
         if let Some(added) = Bounds::of(self.points[before..].iter().copied()) {
             self.bounds = Some(match self.bounds {
@@ -167,12 +187,14 @@ impl Squiggle {
     /// Keeps only the points matching `predicate`, then recomputes the extent.
     pub fn retain(&mut self, predicate: impl FnMut(&Point) -> bool) {
         self.points.retain(predicate);
+        self.spectrum = None;
         self.bounds = Bounds::of(self.points.iter().copied());
     }
 
     pub fn clear(&mut self) {
         self.points.clear();
         self.bounds = None;
+        self.spectrum = None;
     }
 
     /// Flips selection, as the Java `pick` handler did.

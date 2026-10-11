@@ -13,7 +13,9 @@ use bevy::window::PrimaryWindow;
 use bevy_egui::{
     EguiContext, EguiContexts, EguiGlobalSettings, EguiPrimaryContextPass, PrimaryEguiContext, egui,
 };
-use squiggle_core::Rgba;
+use squiggle_core::{
+    Component, Rgba, Transform, TransformOptions, Wavelet, WaveletOutput, Window as Taper,
+};
 
 use crate::demo::{self, DemoOptions};
 use crate::plot::{AddSquiggle, FitToData, Plot, PlotCamera, RemoveSquiggle, SquiggleModel};
@@ -46,6 +48,60 @@ pub struct PlotCommands<'w> {
 pub struct Chrome {
     pub sidebar_open: bool,
     pub about_open: bool,
+    pub transform_settings_open: bool,
+    pub transforms: TransformSettings,
+    /// Why the last transform failed, until dismissed.
+    pub transform_error: Option<String>,
+}
+
+/// The parameters behind the Transform menu.
+pub struct TransformSettings {
+    pub options: TransformOptions,
+    pub stft_window: Taper,
+    pub stft_size: usize,
+    pub stft_hop: usize,
+    pub wavelet: Wavelet,
+    pub wavelet_levels: usize,
+    pub wavelet_output: WaveletOutput,
+    /// Delete the squiggles a transform was applied to.
+    pub replace_source: bool,
+    /// Frame the plot on the results; a spectrum rarely shares a scale with
+    /// the signal it came from.
+    pub fit_after: bool,
+}
+
+impl Default for TransformSettings {
+    fn default() -> Self {
+        Self {
+            options: TransformOptions::default(),
+            stft_window: Taper::default(),
+            stft_size: 256,
+            stft_hop: 128,
+            wavelet: Wavelet::default(),
+            wavelet_levels: 4,
+            wavelet_output: WaveletOutput::default(),
+            replace_source: false,
+            fit_after: true,
+        }
+    }
+}
+
+impl TransformSettings {
+    /// Every transform the menu offers, configured from these settings.
+    fn transforms(&self) -> [Transform; 6] {
+        [
+            Transform::Fourier,
+            Transform::Dft,
+            Transform::Fft,
+            Transform::Stft { window: self.stft_window, size: self.stft_size, hop: self.stft_hop },
+            Transform::InverseFourier,
+            Transform::Wavelet {
+                family: self.wavelet,
+                levels: self.wavelet_levels,
+                output: self.wavelet_output,
+            },
+        ]
+    }
 }
 
 fn setup(mut commands: Commands, mut egui_settings: ResMut<EguiGlobalSettings>) {
@@ -130,6 +186,8 @@ fn chrome(
     }
 
     about_window(&ctx, &mut chrome);
+    transform_window(&ctx, &mut chrome);
+    transform_error_window(&ctx, &mut chrome);
 
     hand_viewport_to_plot(&window, &mut camera, &mut plot, left, top);
     Ok(())
@@ -165,12 +223,184 @@ fn menu_bar(
                 ui.close();
             }
         });
+        ui.menu_button("Transform", |ui| transform_menu(ui, chrome, squiggles, commands));
         ui.menu_button("Help", |ui| {
             if ui.button("About").clicked() {
                 chrome.about_open = true;
                 ui.close();
             }
         });
+    });
+}
+
+fn transform_menu(
+    ui: &mut egui::Ui,
+    chrome: &mut Chrome,
+    squiggles: &Query<(Entity, &mut SquiggleModel)>,
+    commands: &mut PlotCommands,
+) {
+    let any_selected = squiggles.iter().any(|(_, model)| model.selected);
+    let hint = |transform: &Transform| match transform {
+        Transform::Fourier => "Continuous Fourier integral, honouring uneven sample spacing",
+        Transform::Dft => "Discrete Fourier transform, summed directly — slow on long squiggles",
+        Transform::Fft => "Discrete Fourier transform by FFT",
+        Transform::Stft { .. } => "A spectrum per windowed frame, as a waterfall",
+        Transform::InverseFourier => "Back from a spectrum to a signal",
+        Transform::Wavelet { .. } => "Split into wavelet levels, coarse to fine",
+    };
+
+    for transform in chrome.transforms.transforms() {
+        if matches!(transform, Transform::InverseFourier | Transform::Stft { .. }) {
+            ui.separator();
+        }
+        let response = ui
+            .add_enabled(any_selected, egui::Button::new(transform.label()))
+            .on_hover_text(hint(&transform))
+            .on_disabled_hover_text("Select a squiggle to transform");
+        if response.clicked() {
+            apply_transform(transform, chrome, squiggles, commands);
+            ui.close();
+        }
+    }
+
+    ui.separator();
+    if ui.button("Settings…").clicked() {
+        chrome.transform_settings_open = true;
+        ui.close();
+    }
+}
+
+/// Transforms every selected squiggle, adding the results to the plot.
+fn apply_transform(
+    transform: Transform,
+    chrome: &mut Chrome,
+    squiggles: &Query<(Entity, &mut SquiggleModel)>,
+    commands: &mut PlotCommands,
+) {
+    let settings = &chrome.transforms;
+    let mut failures = Vec::new();
+    let mut added = false;
+
+    for (entity, model) in squiggles.iter().filter(|(_, model)| model.selected) {
+        match transform.apply(model, &settings.options) {
+            Ok(outputs) => {
+                added |= !outputs.is_empty();
+                for output in outputs {
+                    commands.add.write(AddSquiggle(output));
+                }
+                if settings.replace_source {
+                    commands.remove.write(RemoveSquiggle(entity));
+                }
+            }
+            Err(error) => failures.push(format!("{}: {error}", model.name)),
+        }
+    }
+
+    if added && settings.fit_after {
+        commands.fit.write(FitToData);
+    }
+    chrome.transform_error = (!failures.is_empty())
+        .then(|| format!("{} failed on\n{}", transform.label(), failures.join("\n")));
+}
+
+fn transform_window(ctx: &egui::Context, chrome: &mut Chrome) {
+    if !chrome.transform_settings_open {
+        return;
+    }
+
+    let settings = &mut chrome.transforms;
+    egui::Window::new("Transform Settings")
+        .collapsible(false)
+        .resizable(false)
+        .open(&mut chrome.transform_settings_open)
+        .show(ctx, |ui| {
+            ui.heading("Spectra");
+            egui::Grid::new("transform_spectra").num_columns(2).show(ui, |ui| {
+                ui.label("Plot");
+                choice(ui, "component", &mut settings.options.component, &Component::ALL, |c| c.label());
+                ui.end_row();
+
+                ui.label("Frequencies");
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut settings.options.one_sided, true, "One-sided");
+                    ui.radio_value(&mut settings.options.one_sided, false, "Two-sided");
+                });
+                ui.end_row();
+            });
+
+            ui.separator();
+            ui.heading("Short-time Fourier");
+            egui::Grid::new("transform_stft").num_columns(2).show(ui, |ui| {
+                ui.label("Window");
+                choice(ui, "window", &mut settings.stft_window, &Taper::ALL, |w| w.label());
+                ui.end_row();
+
+                ui.label("Frame size");
+                ui.add(egui::DragValue::new(&mut settings.stft_size).range(2..=65_536).suffix(" samples"));
+                ui.end_row();
+
+                ui.label("Hop");
+                ui.add(egui::DragValue::new(&mut settings.stft_hop).range(1..=65_536).suffix(" samples"));
+                ui.end_row();
+            });
+
+            ui.separator();
+            ui.heading("Wavelet");
+            egui::Grid::new("transform_wavelet").num_columns(2).show(ui, |ui| {
+                ui.label("Family");
+                choice(ui, "wavelet", &mut settings.wavelet, &Wavelet::ALL, |w| w.label());
+                ui.end_row();
+
+                ui.label("Levels");
+                ui.add(egui::DragValue::new(&mut settings.wavelet_levels).range(1..=16))
+                    .on_hover_text("Clamped to as many as the squiggle is long enough for");
+                ui.end_row();
+
+                ui.label("Plot");
+                choice(ui, "wavelet_output", &mut settings.wavelet_output, &WaveletOutput::ALL, |o| {
+                    o.label()
+                });
+                ui.end_row();
+            });
+
+            ui.separator();
+            ui.checkbox(&mut settings.options.stack, "Stack frames and levels")
+                .on_hover_text("Offset STFT frames and wavelet levels so they do not overlap");
+            ui.checkbox(&mut settings.replace_source, "Replace the source squiggles");
+            ui.checkbox(&mut settings.fit_after, "Fit the plot to the results");
+        });
+}
+
+fn transform_error_window(ctx: &egui::Context, chrome: &mut Chrome) {
+    let Some(message) = &chrome.transform_error else {
+        return;
+    };
+
+    let mut open = true;
+    egui::Window::new("Transform Failed")
+        .collapsible(false)
+        .resizable(false)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.label(message);
+        });
+    if !open {
+        chrome.transform_error = None;
+    }
+}
+
+/// A drop-down over a fixed set of values.
+fn choice<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    id: &str,
+    value: &mut T,
+    options: &[T],
+    label: impl Fn(T) -> &'static str,
+) {
+    egui::ComboBox::from_id_salt(id).selected_text(label(*value)).show_ui(ui, |ui| {
+        for option in options {
+            ui.selectable_value(value, *option, label(*option));
+        }
     });
 }
 
@@ -256,6 +486,7 @@ fn about_window(ctx: &egui::Context, chrome: &mut Chrome) {
             ui.separator();
             ui.label("Drag to pan. Scroll to zoom — hold Alt to keep the x scale, Control to keep the y scale.");
             ui.label("Click a squiggle to select it and show its samples.");
+            ui.label("Transform turns the selected squiggles into spectra or wavelet levels.");
         });
 }
 

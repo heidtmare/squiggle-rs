@@ -38,13 +38,40 @@ workspace already compiles dependencies with optimizations in dev profiles.
 | Add a demo squiggle | **Add Squiggle** in the toolbar |
 | Frame everything | **Fit** in the toolbar |
 | List and delete squiggles | The **Squiggles** sidebar handle on the left |
+| Transform a squiggle | Select it, then pick from the **Transform** menu |
 
 Independent x and y zoom is deliberate: waveform axes rarely share a unit.
+
+## Transforms
+
+The **Transform** menu turns each selected squiggle into new ones, added to
+the plot in the source's colour. **Transform ▸ Settings…** holds the
+parameters.
+
+| Transform | Result |
+| --- | --- |
+| Fourier | The magnitude of the continuous Fourier integral, approximated at each sample's real x, so uneven spacing is honoured |
+| DFT | The discrete Fourier transform, summed directly (O(N²)) |
+| FFT | The same spectrum by FFT — radix-2, or Bluestein for lengths that are not powers of two |
+| STFT | One spectrum per windowed frame (Rectangular, Hann, Hamming or Blackman), stacked as a waterfall |
+| Inverse Fourier | Back to the signal. Exact for anything Fourier, DFT, FFT or STFT produced; any other squiggle is read as an amplitude spectrum and synthesised from cosines |
+| Wavelet | Haar or Daubechies 2–4 decomposition, as signal-aligned bands that sum to the original, or as raw coefficients per level |
+
+Spectra plot amplitude, power, decibels or phase, one- or two-sided. DFT, FFT
+and STFT amplitudes are in the signal's own units: a sine of amplitude 3 peaks
+at 3. Everything but the continuous Fourier transform assumes evenly spaced
+samples, taking the interval from the first and last x.
+
+A transformed squiggle keeps its complex spectrum alongside the plotted
+points, which is what lets the inverse reproduce the original exactly rather
+than reconstruct it from magnitudes alone. The transforms live in
+`squiggle_core::transform` and, like the rest of the core, need no
+dependencies — the FFT is implemented there.
 
 ## Layout
 
 ```
-squiggle-core/   model and coordinate math, no rendering dependencies
+squiggle-core/   model, coordinate math and transforms, no dependencies
 squiggle-app/    the Bevy application
   assets/shaders/squiggle_line.wgsl   screen-space polyline expansion
   src/plot/      camera, input, meshing, overlay
@@ -132,4 +159,6 @@ cargo test          # the whole workspace
 
 `squiggle-core`'s tests cover the projection round trip, culling, zoom
 anchoring, tick placement under pan and zoom, label formatting, bounds
-maintenance and hit-testing. `squiggle-app` tests the mesh builder's topology.
+maintenance, hit-testing, and the transforms: FFT against DFT, exact
+forward-inverse round trips, amplitude scaling, STFT frame placement, and
+wavelet orthonormality and reconstruction. `squiggle-app` tests the mesh builder's topology.
