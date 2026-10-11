@@ -19,13 +19,18 @@ use squiggle_core::{
 
 use crate::demo::{self, DemoOptions};
 use crate::plot::{AddSquiggle, FitToData, Plot, PlotCamera, PlotMode, RemoveSquiggle, SquiggleModel};
+use crate::process_ui::{self, ProcessWindows};
 use crate::project_ui::{self, ProjectAccess, ProjectWindows};
+use crate::workspace::WorkspaceRequest;
 use crate::showcase::{LoadScene, Scene, Showcase};
 use crate::tracks::{self, RowOrder, Track, TrackView};
 
 const HANDLE_WIDTH: f32 = 26.0;
 const SIDEBAR_WIDTH: f32 = 300.0;
 const SHOWCASE_WIDTH: f32 = 340.0;
+const UNDO: egui::KeyboardShortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Z);
+const REDO: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT), egui::Key::Z);
 const PASS_COLOR: egui::Color32 = egui::Color32::from_rgb(90, 210, 110);
 const FAIL_COLOR: egui::Color32 = egui::Color32::from_rgb(235, 80, 80);
 
@@ -35,8 +40,12 @@ impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Chrome>()
             .init_resource::<ProjectWindows>()
+            .init_resource::<ProcessWindows>()
             .add_systems(Startup, setup)
-            .add_systems(EguiPrimaryContextPass, (chrome, tracks::tracks_ui, project_ui::windows).chain());
+            .add_systems(
+                EguiPrimaryContextPass,
+                (chrome, tracks::tracks_ui, project_ui::windows, process_ui::windows).chain(),
+            );
     }
 }
 
@@ -57,6 +66,7 @@ pub struct TrackAccess<'w, 's> {
     mode: ResMut<'w, PlotMode>,
     view: ResMut<'w, TrackView>,
     tracks: Query<'w, 's, &'static mut Track>,
+    process: ResMut<'w, ProcessWindows>,
 }
 
 /// Which parts of the chrome are open.
@@ -161,6 +171,15 @@ fn chrome(
     let ctx = contexts.ctx_mut()?.clone();
     ctx.set_visuals(egui::Visuals::dark());
 
+    // Undo and redo, unless a text field has the keyboard.
+    if !ctx.egui_wants_keyboard_input() {
+        if ctx.input_mut(|i| i.consume_shortcut(&REDO)) {
+            project.workspace.redo();
+        } else if ctx.input_mut(|i| i.consume_shortcut(&UNDO)) {
+            project.workspace.undo();
+        }
+    }
+
     // Panels are laid out inside a background Ui covering the whole viewport;
     // whatever rectangle survives is where the plot goes.
     let mut root = egui::Ui::new(
@@ -242,6 +261,20 @@ fn menu_bar(
             }
         });
         ui.menu_button("Edit", |ui| {
+            let workspace = &mut project.workspace;
+            let undo = workspace.undo_label().map_or("Undo".to_string(), |l| format!("Undo {l}"));
+            let shortcut = ui.ctx().format_shortcut(&UNDO);
+            if ui.add_enabled(workspace.undo_label().is_some(), egui::Button::new(undo).shortcut_text(shortcut)).clicked() {
+                workspace.undo();
+                ui.close();
+            }
+            let redo = workspace.redo_label().map_or("Redo".to_string(), |l| format!("Redo {l}"));
+            let shortcut = ui.ctx().format_shortcut(&REDO);
+            if ui.add_enabled(workspace.redo_label().is_some(), egui::Button::new(redo).shortcut_text(shortcut)).clicked() {
+                workspace.redo();
+                ui.close();
+            }
+            ui.separator();
             let selected: Vec<Entity> = squiggles
                 .iter()
                 .filter(|(_, model)| model.selected)
@@ -259,11 +292,26 @@ fn menu_bar(
             }
         });
         ui.menu_button("Project", |ui| project_ui::project_menu(ui, project));
+        ui.menu_button("Process", |ui| {
+            process_ui::process_menu(ui, &mut tracks.process, &mut tracks.view);
+            if tracks.process.processing_open || tracks.process.align_open {
+                *tracks.mode = PlotMode::Tracks;
+            }
+        });
         ui.menu_button("Transform", |ui| {
             let sources = TransformSources { squiggles, tracks, width: plot.view.plot_width() };
             transform_menu(ui, chrome, sources, commands, &project.workspace.project);
         });
         ui.menu_button("Demo", |ui| {
+            if ui
+                .button("Synthetic event (alignment)")
+                .on_hover_text("A new project: seven sensors recording one event with known delays")
+                .clicked()
+            {
+                project.requests.write(WorkspaceRequest::Synthetic);
+                ui.close();
+            }
+            ui.separator();
             for scene in Scene::ALL {
                 if ui
                     .button(scene.label())
@@ -551,6 +599,7 @@ fn toolbar(
         if *tracks.mode == PlotMode::Tracks {
             ui.label("Rows by");
             choice(ui, "row_order", &mut tracks.view.order, &RowOrder::ALL, |o| o.label());
+            ui.checkbox(&mut tracks.view.show_raw, "Raw").on_hover_text("Plot tracks without their processing");
         }
 
         ui.separator();
@@ -676,11 +725,14 @@ fn about_window(ctx: &egui::Context, chrome: &mut Chrome) {
             ui.separator();
             ui.strong("Tracks");
             ui.label("Scroll to zoom time, drag to pan time and rows, pinch or Control-scroll to scale amplitude.");
-            ui.label("Click a row to select it; right-click for its y scale and I/Q component. Double-click to fit.");
+            ui.label("Click a row to select it; right-click for display, y scale, I/Q component, reference and offset lock. Double-click to fit.");
+            ui.label("Shift+drag a row to shift it in time (snaps to correlation peaks against the reference; Alt disables). Arrow keys nudge selected rows one sample, ten with Shift.");
             ui.strong("Overlay");
             ui.label("Drag to pan. Scroll to zoom — hold Alt to keep the x scale, Control to keep the y scale.");
             ui.label("Click a squiggle to select it and show its samples.");
             ui.separator();
+            ui.label("Process ▸ Filter and detrend preprocesses selected tracks; Process ▸ Align measures and applies delays.");
+            ui.label("Edits to processing and offsets undo with ⌘Z / Ctrl+Z and redo with ⇧⌘Z.");
             ui.label("Transform turns the selected squiggles, or the visible part of selected tracks, into spectra or wavelet levels.");
         });
 }

@@ -8,7 +8,7 @@ mod csv;
 mod decode;
 mod mseed;
 pub mod raw;
-mod sac;
+pub mod sac;
 mod sigmf;
 mod source;
 mod store;

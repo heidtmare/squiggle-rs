@@ -17,6 +17,7 @@ use squiggle_core::{
 use squiggle_io::{FileRead, PROJECT_EXTENSION, ProjectStore, ReadError, SqliteStore};
 
 use crate::plot::Plot;
+use crate::synthetic;
 
 /// Colour of traces whose sensor has no phenomenology yet.
 pub const UNASSIGNED_COLOR: Rgba = Rgba::new(0.6, 0.6, 0.6);
@@ -48,6 +49,8 @@ pub enum WorkspaceRequest {
     Import(Vec<PathBuf>),
     /// Decodes headerless files with an analyst-supplied layout.
     ImportRaw(Vec<PathBuf>, RawLayout),
+    /// Replaces the project with the synthetic alignment event.
+    Synthetic,
     /// Re-issues a request that was held back by the unsaved-project prompt.
     Discard(Box<WorkspaceRequest>),
 }
@@ -55,7 +58,7 @@ pub enum WorkspaceRequest {
 impl WorkspaceRequest {
     /// Requests that replace the current project.
     fn replaces_project(&self) -> bool {
-        matches!(self, Self::New | Self::OpenDialog | Self::Open(_))
+        matches!(self, Self::New | Self::OpenDialog | Self::Open(_) | Self::Synthetic)
     }
 }
 
@@ -75,12 +78,24 @@ pub struct Workspace {
     pub error: Option<String>,
     /// Held while the analyst decides whether to discard an unsaved project.
     pub confirm_discard: Option<WorkspaceRequest>,
+    /// Known event delay per trace, seconds; synthetic data only.
+    pub truth: HashMap<Id, f64>,
     log: Vec<Op>,
     /// Ops a fresh project starts with; more than this and an unsaved project has edits.
     created_ops: usize,
     store: Option<Mutex<SqliteStore>>,
     /// Bumped on every change the plot must reflect.
     revision: u64,
+    undo: Vec<Command>,
+    redo: Vec<Command>,
+}
+
+/// One undoable analyst action. Undo and redo append ops; the log is never rewritten.
+#[derive(Clone, Debug)]
+struct Command {
+    label: String,
+    forward: Vec<Change>,
+    inverse: Vec<Change>,
 }
 
 impl Workspace {
@@ -93,10 +108,13 @@ impl Workspace {
             samples: HashMap::new(),
             error: None,
             confirm_discard: None,
+            truth: HashMap::new(),
             created_ops: log.len(),
             log,
             store: None,
             revision: 1,
+            undo: Vec::new(),
+            redo: Vec::new(),
         }
     }
 
@@ -121,6 +139,69 @@ impl Workspace {
                 false
             }
         }
+    }
+
+    /// Commits `changes` as one undoable command. All are checked first, so
+    /// either every change lands or none does.
+    pub fn execute(&mut self, label: impl Into<String>, changes: Vec<Change>) -> Result<(), String> {
+        let mut trial = self.project.clone();
+        let mut inverse = Vec::with_capacity(changes.len());
+        for change in &changes {
+            inverse.push(trial.inverse(change).ok_or("this change cannot be undone")?);
+            trial.commit(&self.analyst, change.clone()).map_err(|e| e.to_string())?;
+        }
+        for change in &changes {
+            self.commit(change.clone())?;
+        }
+        inverse.reverse();
+        self.undo.push(Command { label: label.into(), forward: changes, inverse });
+        self.redo.clear();
+        Ok(())
+    }
+
+    /// [`Self::execute`], routing failure to the error window.
+    pub fn execute_or_report(&mut self, label: impl Into<String>, changes: Vec<Change>) -> bool {
+        match self.execute(label, changes) {
+            Ok(()) => true,
+            Err(error) => {
+                self.error = Some(error);
+                false
+            }
+        }
+    }
+
+    pub fn undo_label(&self) -> Option<&str> {
+        self.undo.last().map(|c| c.label.as_str())
+    }
+
+    pub fn redo_label(&self) -> Option<&str> {
+        self.redo.last().map(|c| c.label.as_str())
+    }
+
+    pub fn undo(&mut self) {
+        if let Some(command) = self.undo.pop() {
+            match self.replay(&command.inverse) {
+                Ok(()) => self.redo.push(command),
+                Err(error) => self.error = Some(format!("Undo {}: {error}", command.label)),
+            }
+        }
+    }
+
+    pub fn redo(&mut self) {
+        if let Some(command) = self.redo.pop() {
+            match self.replay(&command.forward) {
+                Ok(()) => self.undo.push(command),
+                Err(error) => self.error = Some(format!("Redo {}: {error}", command.label)),
+            }
+        }
+    }
+
+    fn replay(&mut self, changes: &[Change]) -> Result<(), String> {
+        let mut trial = self.project.clone();
+        for change in changes {
+            trial.commit(&self.analyst, change.clone()).map_err(|e| e.to_string())?;
+        }
+        changes.iter().try_for_each(|change| self.commit(change.clone()))
     }
 
     pub fn is_unsaved(&self) -> bool {
@@ -162,11 +243,41 @@ impl Workspace {
             samples: HashMap::new(),
             error: None,
             confirm_discard: None,
+            truth: HashMap::new(),
             created_ops: log.len(),
             log,
             store: Some(Mutex::new(store)),
             revision: 1,
+            undo: Vec::new(),
+            redo: Vec::new(),
         })
+    }
+
+    /// A project holding the synthetic event, with its true delays.
+    fn synthetic(analyst: Analyst) -> Result<Self, String> {
+        let mut next = Self::new(analyst);
+        next.commit(Change::RenameProject { name: "Synthetic event".to_string() })?;
+        let paths = synthetic::write(&synthetic::directory())?;
+        let mut queue = ImportQueue::default();
+        for (path, spec) in paths.iter().zip(&synthetic::SPECS) {
+            let read = squiggle_io::read_file(path).map_err(|e| e.to_string())?;
+            queue.push_file(read, None, &next.project);
+            if let Some(row) = queue.rows.last_mut() {
+                row.phenomenology = Some(PhenomenologyId::new(spec.phenomenology));
+            }
+        }
+        if !queue.confirm(&mut next) {
+            return Err("synthetic import failed".to_string());
+        }
+        let origin: Timestamp = synthetic::ORIGIN.parse().expect("valid constant");
+        next.commit(Change::SetReference { reference: origin })?;
+        for spec in &synthetic::SPECS {
+            let sensor = next.project.sensor_by_code(&spec.code()).map(|s| s.id);
+            if let Some(trace) = next.project.traces().iter().find(|t| Some(t.sensor) == sensor) {
+                next.truth.insert(trace.id, spec.delay);
+            }
+        }
+        Ok(next)
     }
 
     /// Replaces the project, keeping the analyst and bumping the revision so stale squiggles go.
@@ -310,6 +421,8 @@ impl ImportQueue {
                 len: row.samples.len(),
                 kind: row.samples.kind(),
                 source: row.source,
+                processing: Default::default(),
+                alignment: None,
             };
             let id = trace.id;
             if !workspace.commit_or_report(Change::AddTrace(trace)) {
@@ -490,6 +603,13 @@ fn handle_requests(
                 queue.raw_layout = *layout;
                 tasks.reads.push(read_files(paths.clone(), Some(*layout)));
             }
+            WorkspaceRequest::Synthetic => match Workspace::synthetic(workspace.analyst.clone()) {
+                Ok(next) => {
+                    workspace.replace(next);
+                    queue.cancel();
+                }
+                Err(error) => workspace.error = Some(error),
+            },
             WorkspaceRequest::Discard(_) => {}
         }
     }
@@ -679,6 +799,54 @@ mod tests {
         assert_eq!(queue.raw_pending.len(), 1);
         assert_eq!(queue.raw_layout, layout);
         assert!(queue.is_open());
+    }
+
+    #[test]
+    fn commands_undo_and_redo_through_the_log() {
+        use squiggle_core::sensor::Provenance;
+        let mut workspace = workspace();
+        let mut queue = ImportQueue { rows: vec![row("s", "2026-10-11T00:00:00Z", "100", Some("seismic"))], ..ImportQueue::default() };
+        queue.confirm(&mut workspace);
+        let trace = workspace.project.traces()[0].id;
+        let shift = |offset_s| Change::SetAlignment {
+            trace,
+            alignment: Some(squiggle_core::Alignment {
+                offset_s,
+                provenance: Provenance::Manual { analyst: Analyst("ana".into()), at: Timestamp::now() },
+                locked: true,
+            }),
+            revert: false,
+        };
+        let ops = workspace.log.len();
+        workspace.execute("Shift", vec![shift(1.0), shift(2.5)]).unwrap();
+        assert_eq!(workspace.project.trace(trace).unwrap().offset(), 2.5);
+        assert_eq!(workspace.undo_label(), Some("Shift"));
+
+        workspace.undo();
+        assert_eq!(workspace.project.trace(trace).unwrap().alignment, None);
+        assert_eq!(workspace.redo_label(), Some("Shift"));
+        workspace.redo();
+        assert_eq!(workspace.project.trace(trace).unwrap().offset(), 2.5);
+        // Two forward, two inverse, two redone: the log only grows.
+        assert_eq!(workspace.log.len(), ops + 6);
+        assert_eq!(Project::replay(&workspace.log).unwrap(), workspace.project);
+
+        // A failing change leaves nothing behind.
+        let before = workspace.log.len();
+        let ghost = Change::SetProcessing { trace: Id::generate(), processing: Default::default() };
+        assert!(workspace.execute("Bad", vec![shift(9.0), ghost]).is_err());
+        assert_eq!(workspace.log.len(), before);
+        assert_eq!(workspace.project.trace(trace).unwrap().offset(), 2.5);
+        assert_eq!(workspace.redo_label(), None);
+    }
+
+    #[test]
+    fn the_synthetic_event_loads_with_its_truth() {
+        let workspace = Workspace::synthetic(Analyst("ana".into())).unwrap();
+        assert_eq!(workspace.project.traces().len(), synthetic::SPECS.len());
+        assert_eq!(workspace.truth.len(), synthetic::SPECS.len());
+        assert!(workspace.project.traces().iter().all(|t| workspace.project.trace_phenomenology(t).is_some()));
+        assert_eq!(workspace.project.reference, Some(synthetic::ORIGIN.parse().unwrap()));
     }
 
     #[test]

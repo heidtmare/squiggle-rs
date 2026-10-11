@@ -15,6 +15,13 @@ them through Fourier and wavelet transforms without leaving the plot.
   millions of samples per trace interactive.
 - **Seismic, RF and digitizer formats.** miniSEED (Steim1/2), SAC, SigMF
   (complex I/Q), WAV, CSV and raw binary with a described layout.
+- **Preprocessing.** Detrend, taper and Butterworth filters (low-, high-,
+  band-pass, band-stop; zero-phase or causal) per trace, saved in the project.
+- **Alignment.** Cross-correlation or GCC-PHAT delays between traces at any
+  rates, reconciled across all pairs by least squares, reviewed before
+  applying. Manual shifts by drag (snapping to correlation peaks) or by
+  sample. Every edit undoes.
+- **Spectrogram strips** per row, two-sided for I/Q.
 - **Independent axis zoom.** Zoom x and y together or separately, anchored on
   the point under the cursor — waveform axes rarely share a unit.
 - **Even strokes at any zoom.** Lines are widened in screen space after
@@ -45,6 +52,7 @@ already compiles dependencies with optimizations in dev profiles.
 | Flag | Effect |
 | --- | --- |
 | `--project FILE` | Open a `.squiggle` project |
+| `--synthetic` | Start with a synthetic event of known delays (see [Alignment](#alignment)) |
 | `WAVEFORM...` | Import these files (any format below) |
 | `--squiggles N` | Start with `N` demo squiggles |
 | `--samples N` | Samples per demo squiggle |
@@ -63,12 +71,18 @@ one row each, on a shared time axis; it opens when traces are loaded.
 | Pan time / scroll rows | Drag, or horizontal scroll / scroll over the labels |
 | Scale amplitude (all rows) | Pinch, or `Control` + scroll |
 | Select a track | Click its row or label |
-| Y scale (normalized, auto, fixed), I/Q component | Right-click a row |
+| Waveform / spectrogram / both, FFT size, y scale, I/Q component | Right-click a row |
+| Alignment reference, lock / unlock / reset offset | Right-click a row |
+| Shift a track in time | `Shift` + drag its row (`Alt` disables snapping) |
+| Nudge selected tracks | `←` / `→` one sample, with `Shift` ten |
 | Frame every trace | **Fit**, or double-click |
 | Order rows | **Rows by** in the toolbar |
+| Plot without processing | **Raw** in the toolbar |
+| Undo / redo | `⌘Z` / `⇧⌘Z` (`Ctrl` elsewhere), or **Edit** |
 
 The gold cursor spans every row; its time is shown on the axis, and its UTC
-time and the pixel size at the top right.
+time and the pixel size at the top right. A row's third line shows its offset
+(`Δ`, 🔒 when locked) and processing; the reference is marked ★.
 
 | Overlay | Control |
 | --- | --- |
@@ -102,7 +116,9 @@ change.
 | Review sensors and traces | **Project ▸ Sensors…** |
 | Add or edit phenomenologies | **Project ▸ Phenomenologies…** |
 
-Once saved, every edit is written immediately.
+Once saved, every edit is written immediately. Undo and redo append the
+inverse or repeated change to the log; the log is never rewritten. Processing
+and offset edits undo; imports and phenomenology assignments do not yet.
 
 **Import.** Each channel is listed for confirmation: sensor code, start time
 (UTC, ISO 8601), sample rate, phenomenology. Values not found in the file are
@@ -139,6 +155,47 @@ has quantity, units, sample kind, propagation (constant speed, phases, or
 unknown) and colour. Edits create a new version; assignments record the
 version and the analyst. Sensors without one are plotted grey and refused by
 **Transform**.
+
+## Processing and alignment
+
+**Process ▸ Filter and detrend…** sets the selected tracks' processing:
+remove mean or linear trend, Hann taper, then a Butterworth filter of order
+1–10 (band filters have twice the poles), zero-phase (forward-backward with
+steady-state edges) or causal. Each gap-free run is processed separately.
+Processing needs an assigned phenomenology and a corner below Nyquist; it is
+stored per trace and applied on load. Complex traces are filtered per
+component.
+
+### Alignment
+
+**Process ▸ Align…** measures each selected trace's delay behind a reference
+(★; right-click a row to choose) over a time window (default: the visible
+range) within a search range:
+
+1. Each pair is resampled onto one grid at the lower rate, capped at 2²⁰
+   samples (Kaiser-windowed sinc, anti-aliased).
+2. Cross-correlation (normalised) or GCC-PHAT gives the lag, refined to a
+   sub-sample by a parabola. Confidence is `1 − second peak / main peak`.
+3. With **Every pair**, all pairs are measured and the delays solved by
+   weighted least squares (weight = coefficient × confidence); residuals show
+   disagreement.
+
+Results list delay, coefficient, confidence, worst residual and the new
+offset. Rows start checked only when the reference pair is strong and the
+pairs agree within two samples. **Apply** shifts each checked trace by minus
+its delay, as one undoable command with automatic provenance. Locked offsets
+(any manual shift locks) are reported and never changed; traces of another
+phenomenology or unassigned ones are skipped, since waveforms of different
+physics do not correlate.
+
+Offsets are per trace and global until events exist; rows are drawn at
+clock-corrected start plus offset.
+
+`--synthetic` (or **Demo ▸ Synthetic event**) writes seven SAC files to the
+temp directory: five seismic stations (40–200 Hz) and two infrasound sensors
+recording one event with known delays under a strong microseism. Align then
+shows a *vs truth* column. Unfiltered, the microseism dominates and rows stay
+unchecked; after a 1–15 Hz band-pass, delays land within 1.5 ms of truth.
 
 ## Transforms
 
@@ -183,11 +240,14 @@ cargo run -p squiggle-app --release -- --demo fourier --screenshot fourier.png
 ### Layout
 
 ```
-squiggle-core/   model, project op log, time, samples, LOD, transforms; no dependencies (optional serde)
+squiggle-core/   model, project op log, time, samples, LOD, transforms, DSP; no dependencies (optional serde)
 squiggle-io/     readers (miniSEED, SAC, SigMF, WAV, CSV, raw), sources, SQLite project store
 squiggle-app/    the Bevy application
   src/workspace.rs   open project, async file I/O
-  src/tracks.rs      stacked tracks: LOD meshes, time axis, labels
+  src/tracks.rs      stacked tracks: LOD meshes, time axis, labels, shifting
+  src/strips.rs      spectrogram strips
+  src/process_ui.rs  filter and align windows
+  src/synthetic.rs   synthetic alignment event
   src/project_ui.rs  import, sensor and phenomenology windows
   assets/shaders/squiggle_line.wgsl   screen-space polyline expansion
   src/plot/      camera, input, meshing, overlay
@@ -220,6 +280,10 @@ zoom changes by more than ~2.8×; otherwise only the transform moves. Mesh x
 is seconds from the window start and the transform is computed in `f64`, so
 nanosecond spacing survives far from the reference.
 
+A row showing a spectrogram has a sprite beneath its line: Welch-averaged
+columns of about one per pixel over the same three-width window, rebuilt
+off-thread when the view leaves it or the zoom drifts 2.5×.
+
 Readers emit through `WaveformSource` (`Header`, `Chunk`, `Gap`, `End`);
 loading consumes sources, so a live feed can replace a file without changing
 display or ingest.
@@ -245,8 +309,14 @@ anchoring, tick placement under pan and zoom, label formatting, bounds
 maintenance, hit-testing, and the transforms: FFT against DFT, exact
 forward-inverse round trips, amplitude scaling, STFT frame placement, and
 wavelet orthonormality and reconstruction, plus LOD ranges and decimation
-against brute force (one chunk or many) and time-axis ticks.
+against brute force (one chunk or many) and time-axis ticks. DSP tests check
+Butterworth responses against −3 dB corners, chunked against whole filtering
+and resampling, zero-phase pulses, alias rejection, spectrogram bins, delay
+recovery (known shifts, sub-sample, gaps, noise confidence), the least-squares
+solve, and known delays at mixed rates recovered within one sample. Project
+tests cover locks, reverts and processing validation.
 `squiggle-io` tests each reader on synthesised files (Steim1/2 round trips,
 both SAC byte orders, SigMF pairs, raw layouts), record merging with gaps,
 source chunking, and change detection. `squiggle-app` tests the mesh
-builder's topology, import validation, LOD bucketing and argument parsing.
+builder's topology, import validation, LOD bucketing, undo/redo through the
+log, the synthetic event and argument parsing.

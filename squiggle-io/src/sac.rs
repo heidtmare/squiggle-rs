@@ -93,6 +93,37 @@ impl WaveformReader for SacReader {
     }
 }
 
+/// A little-endian SAC file of an evenly spaced series. Codes longer than 8
+/// characters are truncated, as the format requires.
+pub fn encode(samples: &[f32], start: Timestamp, rate: f64, [network, station, location, component]: [&str; 4]) -> Vec<u8> {
+    let mut words = [0u32; 110];
+    for (i, w) in words.iter_mut().enumerate() {
+        *w = if i < 70 { (UNDEFINED as f32).to_bits() } else { UNDEFINED as u32 };
+    }
+    let (year, day, hour, minute, second, frac) = start.to_ordinal();
+    words[DELTA] = ((1.0 / rate) as f32).to_bits();
+    words[B] = (frac as f32).to_bits();
+    for (i, v) in [year as i32, day as i32, hour as i32, minute as i32, second as i32, 0].into_iter().enumerate() {
+        words[NZYEAR + i] = v as u32;
+    }
+    words[NVHDR] = 6;
+    words[NPTS] = samples.len() as u32;
+    words[IFTYPE] = ITIME as u32;
+    words[LEVEN] = 1;
+    let mut out: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let mut strings = vec![b' '; HEADER_LEN - 440];
+    for at in (0..strings.len()).step_by(8) {
+        strings[at..at + 6].copy_from_slice(b"-12345");
+    }
+    for (at, text) in [(KSTNM, station), (KHOLE, location), (KCMPNM, component), (KNETWK, network)] {
+        let field: String = format!("{text:<8}").chars().take(8).collect();
+        strings[at - 440..at - 440 + 8].copy_from_slice(field.as_bytes());
+    }
+    out.extend(strings);
+    out.extend(samples.iter().flat_map(|s| s.to_le_bytes()));
+    out
+}
+
 /// `Some(big_endian)` when the header is plausible in one byte order:
 /// `nvhdr` 6 or 7, a known `iftype`, boolean `leven`, positive `delta`.
 fn byte_order(head: &[u8]) -> Option<bool> {
@@ -155,6 +186,16 @@ pub(crate) mod tests {
             assert_eq!(r.start.unwrap().to_string(), "2026-10-11T01:02:04.750000000Z");
             assert_eq!(r.suggestion.as_ref().unwrap().phenomenology.as_str(), "seismic");
         }
+    }
+
+    #[test]
+    fn encoded_files_read_back() {
+        let start: Timestamp = "2026-01-01T00:00:09.63Z".parse().unwrap();
+        let bytes = encode(&[1.0, 2.0], start, 40.0, ["SY", "STA02", "", "BHZ"]);
+        let r = &SacReader.read(Path::new("x.sac"), &bytes).unwrap()[0];
+        assert_eq!(r.code, "SY.STA02..BHZ");
+        assert!((r.start.unwrap().seconds_since(start)).abs() < 1e-7);
+        assert!((r.sample_rate.unwrap() - 40.0).abs() < 1e-4);
     }
 
     #[test]

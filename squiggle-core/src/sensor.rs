@@ -2,6 +2,7 @@
 
 use core::fmt;
 
+use crate::dsp::Processing;
 use crate::id::Id;
 use crate::phenomenology::{PhenomenologyId, SampleKind};
 use crate::samples::RawLayout;
@@ -114,6 +115,17 @@ impl TraceSource {
     }
 }
 
+/// A trace's alignment shift, added to its clock-corrected start. Global until
+/// events exist; event members will carry their own.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Alignment {
+    pub offset_s: f64,
+    pub provenance: Provenance,
+    /// Automatic alignment leaves a locked offset alone.
+    pub locked: bool,
+}
+
 /// Trace metadata, as persisted. Samples are held separately in [`crate::samples::TraceSamples`].
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -127,11 +139,23 @@ pub struct Trace {
     #[cfg_attr(feature = "serde", serde(default))]
     pub kind: SampleKind,
     pub source: TraceSource,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub processing: Processing,
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub alignment: Option<Alignment>,
 }
 
 impl Trace {
     pub fn duration(&self) -> f64 {
         self.len as f64 / self.sample_rate
+    }
+
+    pub fn offset(&self) -> f64 {
+        self.alignment.as_ref().map_or(0.0, |a| a.offset_s)
+    }
+
+    pub fn is_locked(&self) -> bool {
+        self.alignment.as_ref().is_some_and(|a| a.locked)
     }
 }
 

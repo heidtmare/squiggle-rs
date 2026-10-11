@@ -24,7 +24,7 @@ pub struct ProjectWindows {
 /// What the menu bar needs from the project.
 #[derive(SystemParam)]
 pub struct ProjectAccess<'w> {
-    pub workspace: Res<'w, Workspace>,
+    pub workspace: ResMut<'w, Workspace>,
     pub windows: ResMut<'w, ProjectWindows>,
     pub requests: MessageWriter<'w, WorkspaceRequest>,
 }

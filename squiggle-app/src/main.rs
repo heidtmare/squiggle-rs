@@ -6,8 +6,11 @@
 
 mod demo;
 mod plot;
+mod process_ui;
 mod project_ui;
 mod showcase;
+mod strips;
+mod synthetic;
 mod tracks;
 mod ui;
 mod workspace;

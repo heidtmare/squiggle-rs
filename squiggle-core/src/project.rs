@@ -5,9 +5,10 @@
 
 use core::fmt;
 
+use crate::dsp::Processing;
 use crate::id::Id;
 use crate::phenomenology::{self, Phenomenology, PhenomenologyId};
-use crate::sensor::{Analyst, Assignment, ClockCorrection, Provenance, Sensor, Trace};
+use crate::sensor::{Alignment, Analyst, Assignment, ClockCorrection, Provenance, Sensor, Trace};
 use crate::time::Timestamp;
 
 /// Project file format identifier.
@@ -39,6 +40,16 @@ pub enum Change {
     SetClockCorrection { sensor: Id, clock: ClockCorrection },
     AddTrace(Trace),
     RemoveTrace { trace: Id },
+    /// Requires an assigned phenomenology and a filter valid at the trace's rate.
+    SetProcessing { trace: Id, processing: Processing },
+    /// An automatic alignment is refused on a locked trace unless `revert`
+    /// (an undo restoring an earlier value).
+    SetAlignment {
+        trace: Id,
+        alignment: Option<Alignment>,
+        #[cfg_attr(feature = "serde", serde(default))]
+        revert: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -52,6 +63,10 @@ pub enum ApplyError {
     UnknownPhenomenology(PhenomenologyId),
     StaleVersion { phenomenology: PhenomenologyId, version: u32, current: u32 },
     InvalidSampleRate(f64),
+    /// Processing needs an assigned phenomenology.
+    Unassigned(Id),
+    InvalidProcessing(String),
+    Locked(Id),
 }
 
 impl fmt::Display for ApplyError {
@@ -68,6 +83,9 @@ impl fmt::Display for ApplyError {
                 write!(f, "{phenomenology} v{version} does not supersede v{current}")
             }
             Self::InvalidSampleRate(rate) => write!(f, "invalid sample rate {rate}"),
+            Self::Unassigned(id) => write!(f, "trace {id} has no phenomenology assigned"),
+            Self::InvalidProcessing(why) => write!(f, "invalid processing: {why}"),
+            Self::Locked(id) => write!(f, "trace {id} has a locked alignment"),
         }
     }
 }
@@ -190,8 +208,54 @@ impl Project {
                     .ok_or(ApplyError::UnknownTrace(*trace))?;
                 self.traces.remove(index);
             }
+            Change::SetProcessing { trace, processing } => {
+                let current = self.trace(*trace).ok_or(ApplyError::UnknownTrace(*trace))?;
+                if !processing.is_identity() {
+                    if self.trace_phenomenology(current).is_none() {
+                        return Err(ApplyError::Unassigned(*trace));
+                    }
+                    processing
+                        .validate(current.sample_rate)
+                        .map_err(|e| ApplyError::InvalidProcessing(e.to_string()))?;
+                }
+                self.trace_mut(*trace)?.processing = *processing;
+            }
+            Change::SetAlignment { trace, alignment, revert } => {
+                let current = self.trace(*trace).ok_or(ApplyError::UnknownTrace(*trace))?;
+                let automatic = alignment.as_ref().is_some_and(|a| !a.provenance.is_manual());
+                if automatic && !revert {
+                    if current.is_locked() {
+                        return Err(ApplyError::Locked(*trace));
+                    }
+                    if self.trace_phenomenology(current).is_none() {
+                        return Err(ApplyError::Unassigned(*trace));
+                    }
+                }
+                self.trace_mut(*trace)?.alignment = alignment.clone();
+            }
         }
         Ok(())
+    }
+
+    /// The change that undoes `change`, from the current state. `None` for
+    /// changes that cannot be undone yet.
+    pub fn inverse(&self, change: &Change) -> Option<Change> {
+        match change {
+            Change::RenameProject { .. } => Some(Change::RenameProject { name: self.name.clone() }),
+            Change::SetReference { .. } => self.reference.map(|reference| Change::SetReference { reference }),
+            Change::SetClockCorrection { sensor, .. } => {
+                self.sensor(*sensor).map(|s| Change::SetClockCorrection { sensor: *sensor, clock: s.clock })
+            }
+            Change::SetProcessing { trace, .. } => {
+                self.trace(*trace).map(|t| Change::SetProcessing { trace: *trace, processing: t.processing })
+            }
+            Change::SetAlignment { trace, .. } => self.trace(*trace).map(|t| Change::SetAlignment {
+                trace: *trace,
+                alignment: t.alignment.clone(),
+                revert: true,
+            }),
+            _ => None,
+        }
     }
 
     pub fn phenomenologies(&self) -> &[Phenomenology] {
@@ -226,6 +290,10 @@ impl Project {
         self.traces.iter().find(|t| t.id == id)
     }
 
+    fn trace_mut(&mut self, id: Id) -> Result<&mut Trace, ApplyError> {
+        self.traces.iter_mut().find(|t| t.id == id).ok_or(ApplyError::UnknownTrace(id))
+    }
+
     /// The trace's phenomenology, or `None` while its sensor is unassigned.
     /// Processing runs only on traces where this is `Some`.
     pub fn trace_phenomenology(&self, trace: &Trace) -> Option<&Phenomenology> {
@@ -240,6 +308,11 @@ impl Project {
             (Some(sensor), None) => sensor.clock.apply(trace.start, trace.start),
             (None, _) => trace.start,
         }
+    }
+
+    /// Clock-corrected start plus the alignment offset: where the trace is drawn and analysed.
+    pub fn aligned_start(&self, trace: &Trace) -> Timestamp {
+        self.corrected_start(trace).add_seconds(trace.offset())
     }
 }
 
@@ -267,6 +340,8 @@ mod tests {
                 content_hash: "00".to_string(),
                 layout: None,
             },
+            processing: Processing::default(),
+            alignment: None,
         }
     }
 
@@ -344,6 +419,72 @@ mod tests {
         };
         add(&mut project).unwrap();
         assert_eq!(add(&mut project), Err(ApplyError::DuplicateCode("s".to_string())));
+    }
+
+    fn assigned(project: &mut Project) -> Trace {
+        let sensor = Id::generate();
+        project.commit(&analyst(), Change::AddSensor { id: sensor, code: "s".to_string() }).unwrap();
+        project
+            .commit(&analyst(), Change::AssignPhenomenology { sensor, phenomenology: PhenomenologyId::new("seismic") })
+            .unwrap();
+        let t = trace(sensor);
+        project.commit(&analyst(), Change::AddTrace(t.clone())).unwrap();
+        t
+    }
+
+    fn alignment(offset_s: f64, provenance: Provenance, locked: bool) -> Option<Alignment> {
+        Some(Alignment { offset_s, provenance, locked })
+    }
+
+    #[test]
+    fn locked_alignments_refuse_automatic_changes_but_not_reverts() {
+        let (mut project, _) = Project::create("p", &analyst());
+        let t = assigned(&mut project);
+        let auto = Provenance::Auto { stage: "align".into(), config_hash: "x".into() };
+        let manual = Provenance::Manual { analyst: analyst(), at: Timestamp::now() };
+        let set = |alignment, revert| Change::SetAlignment { trace: t.id, alignment, revert };
+
+        project.commit(&analyst(), set(alignment(0.5, auto.clone(), false), false)).unwrap();
+        let undo = project.inverse(&set(alignment(1.0, manual.clone(), true), false)).unwrap();
+        project.commit(&analyst(), set(alignment(1.0, manual, true), false)).unwrap();
+        assert_eq!(project.aligned_start(project.trace(t.id).unwrap()), Timestamp::new(1_001, 0.0));
+        assert_eq!(
+            project.commit(&analyst(), set(alignment(2.0, auto, false), false)),
+            Err(ApplyError::Locked(t.id))
+        );
+        project.commit(&analyst(), undo).unwrap();
+        assert_eq!(project.trace(t.id).unwrap().offset(), 0.5);
+        assert!(!project.trace(t.id).unwrap().is_locked());
+    }
+
+    #[test]
+    fn processing_needs_an_assignment_and_a_valid_filter() {
+        use crate::dsp::{Band, FilterSpec};
+        let (mut project, _) = Project::create("p", &analyst());
+        let sensor = Id::generate();
+        project.commit(&analyst(), Change::AddSensor { id: sensor, code: "u".to_string() }).unwrap();
+        let unassigned = trace(sensor);
+        project.commit(&analyst(), Change::AddTrace(unassigned.clone())).unwrap();
+        let filter = |hz| Processing {
+            filter: Some(FilterSpec { band: Band::Lowpass { hz }, order: 2, zero_phase: true }),
+            ..Processing::default()
+        };
+        assert_eq!(
+            project.commit(&analyst(), Change::SetProcessing { trace: unassigned.id, processing: filter(10.0) }),
+            Err(ApplyError::Unassigned(unassigned.id))
+        );
+        let t = assigned(&mut project);
+        // 100 Hz trace: 60 Hz is past Nyquist.
+        assert!(matches!(
+            project.commit(&analyst(), Change::SetProcessing { trace: t.id, processing: filter(60.0) }),
+            Err(ApplyError::InvalidProcessing(_))
+        ));
+        let change = Change::SetProcessing { trace: t.id, processing: filter(10.0) };
+        let undo = project.inverse(&change).unwrap();
+        project.commit(&analyst(), change).unwrap();
+        assert!(project.trace(t.id).unwrap().processing.filter.is_some());
+        project.commit(&analyst(), undo).unwrap();
+        assert!(project.trace(t.id).unwrap().processing.is_identity());
     }
 
     #[test]

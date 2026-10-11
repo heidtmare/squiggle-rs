@@ -75,6 +75,15 @@ impl Timestamp {
         let days = days_from_civil(year, 1, 1) + i64::from(day_of_year) - 1;
         Self::new(days * 86_400 + i64::from(hour * 3600 + minute * 60 + second), frac)
     }
+
+    /// `(year, day of year, hour, minute, second, fraction)`; inverse of [`Self::from_ordinal`].
+    pub fn to_ordinal(self) -> (i64, u32, u32, u32, u32, f64) {
+        let days = self.secs.div_euclid(86_400);
+        let of_day = self.secs.rem_euclid(86_400);
+        let (year, _, _) = civil_from_days(days);
+        let day_of_year = (days - days_from_civil(year, 1, 1) + 1) as u32;
+        (year, day_of_year, (of_day / 3600) as u32, (of_day / 60 % 60) as u32, (of_day % 60) as u32, self.frac)
+    }
 }
 
 /// Days since 1970-01-01 to (year, month, day). Hinnant's `civil_from_days`.
@@ -232,6 +241,14 @@ mod tests {
     fn ordinal_dates_resolve() {
         let t = Timestamp::from_ordinal(2024, 60, 1, 2, 3, 0.5);
         assert_eq!(t.to_string(), "2024-02-29T01:02:03.500000000Z");
+    }
+
+    #[test]
+    fn ordinals_round_trip() {
+        let t: Timestamp = "2024-12-31T23:59:58.25Z".parse().unwrap();
+        let (y, d, h, m, sec, frac) = t.to_ordinal();
+        assert_eq!((y, d, h, m, sec), (2024, 366, 23, 59, 58));
+        assert_eq!(Timestamp::from_ordinal(y, d, h, m, sec, frac), t);
     }
 
     #[test]

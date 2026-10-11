@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
+use crate::dsp::filter::{DesignError, Processing};
 use crate::phenomenology::SampleKind;
+use crate::transform::Complex;
 
 /// One complex sample: `[I, Q]`.
 pub type Iq = [f32; 2];
@@ -169,6 +171,36 @@ impl TraceSamples {
             _ => return false,
         }
         true
+    }
+
+    /// A processed copy in one chunk. Complex samples are processed per
+    /// component (real coefficients keep baseband I/Q consistent).
+    pub fn processed(&self, processing: &Processing, rate: f64) -> Result<Self, DesignError> {
+        if processing.is_identity() {
+            return Ok(self.clone());
+        }
+        Ok(match self {
+            Self::Real(s) => {
+                let mut values: Vec<f32> = s.iter().collect();
+                processing.apply(&mut values, rate)?;
+                Self::Real(ChunkedSamples::from_vec(values))
+            }
+            Self::Complex(s) => {
+                let mut i: Vec<f32> = s.iter().map(|[i, _]| i).collect();
+                let mut q: Vec<f32> = s.iter().map(|[_, q]| q).collect();
+                processing.apply(&mut i, rate)?;
+                processing.apply(&mut q, rate)?;
+                Self::Complex(ChunkedSamples::from_vec(i.into_iter().zip(q).map(|(i, q)| [i, q]).collect()))
+            }
+        })
+    }
+
+    /// Samples `start..end` as complex values (real samples have zero imaginary part).
+    pub fn complex_range(&self, start: usize, end: usize) -> Vec<Complex> {
+        match self {
+            Self::Real(s) => s.range(start, end).map(|v| Complex::from(f64::from(v))).collect(),
+            Self::Complex(s) => s.range(start, end).map(|[i, q]| Complex::new(f64::from(i), f64::from(q))).collect(),
+        }
     }
 
     /// The real series plotted for `component`. Real samples ignore it.
