@@ -35,6 +35,8 @@ pub struct DemoOptions {
     pub project: Option<std::path::PathBuf>,
     /// Waveform files to import at startup.
     pub import: Vec<std::path::PathBuf>,
+    /// Start with the synthetic alignment event.
+    pub synthetic: bool,
 }
 
 impl Default for DemoOptions {
@@ -46,17 +48,19 @@ impl Default for DemoOptions {
             screenshot: None,
             project: None,
             import: Vec::new(),
+            synthetic: false,
         }
     }
 }
 
 pub const USAGE: &str = "\
-Usage: squiggle-app [--project FILE] [--squiggles N] [--samples N] [--demo SCENE]
-                    [--screenshot FILE] [WAVEFORM...]
+Usage: squiggle-app [--project FILE | --synthetic] [--squiggles N] [--samples N]
+                    [--demo SCENE] [--screenshot FILE] [WAVEFORM...]
 
   WAVEFORM...        import these files at startup (miniSEED, SAC, SigMF,
                      WAV, CSV; anything else as raw binary)
   --project FILE     open a .squiggle project
+  --synthetic        start with a synthetic event of known delays (alignment demo)
   --squiggles N      put N squiggles on the plot at startup (default 0)
   --samples N        samples per generated squiggle (default 1000)
   --demo SCENE       open a transform demo: fourier or wavelet
@@ -98,6 +102,7 @@ impl DemoOptions {
                     let path = args.next().ok_or_else(|| format!("{argument} needs a file"))?;
                     options.project = Some(path.into());
                 }
+                "--synthetic" => options.synthetic = true,
                 "--help" | "-h" => return Err(USAGE.to_string()),
                 other if other.starts_with('-') => {
                     return Err(format!("unrecognised argument: {other}\n\n{USAGE}"));
@@ -119,6 +124,9 @@ pub fn seed(
 ) {
     if let Some(path) = &options.project {
         workspace.write(WorkspaceRequest::Open(path.clone()));
+    }
+    if options.synthetic {
+        workspace.write(WorkspaceRequest::Synthetic);
     }
     if !options.import.is_empty() {
         workspace.write(WorkspaceRequest::Import(options.import.clone()));
@@ -226,6 +234,11 @@ mod tests {
         let options = parse(&["--project", "p.squiggle", "a.wav", "b.csv"]).expect("parses");
         assert_eq!(options.project, Some("p.squiggle".into()));
         assert_eq!(options.import, vec![std::path::PathBuf::from("a.wav"), "b.csv".into()]);
+    }
+
+    #[test]
+    fn the_synthetic_event_can_be_asked_for() {
+        assert!(parse(&["--synthetic"]).unwrap().synthetic);
     }
 
     #[test]

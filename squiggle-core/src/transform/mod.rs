@@ -15,6 +15,7 @@ use core::f64::consts::TAU;
 use core::fmt;
 
 pub use complex::Complex;
+pub use fft::{fft, ifft};
 pub use spectrum::{Basis, Spectrum};
 pub use wavelet::Wavelet;
 
@@ -92,7 +93,7 @@ impl Window {
     }
 
     /// The periodic form of the window, which is what spectral analysis wants.
-    fn coefficients(self, size: usize) -> Vec<f64> {
+    pub fn coefficients(self, size: usize) -> Vec<f64> {
         (0..size)
             .map(|j| {
                 let phase = TAU * j as f64 / size as f64;

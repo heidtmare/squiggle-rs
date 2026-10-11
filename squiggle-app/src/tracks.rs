@@ -4,6 +4,10 @@
 //! cached over three screen widths so panning and moderate zoom reuse the
 //! mesh. Mesh x is seconds from the cache start and the entity transform is
 //! computed in `f64`, so nanosecond spacing survives far from the reference.
+//!
+//! The plotted series is the trace's processed samples (detrend, taper,
+//! filter) unless raw display is on. Rows sit at their aligned start; Shift+drag
+//! and the arrow keys shift them, as undoable commands.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -11,13 +15,16 @@ use std::sync::Arc;
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures::check_ready};
 use bevy_egui::{EguiContexts, egui};
+use squiggle_core::dsp::{AlignSettings, Channel, candidates};
+use squiggle_core::sensor::Provenance;
 use squiggle_core::timeline::format_duration;
 use squiggle_core::{
-    ChunkedSamples, Envelope, Id, IqComponent, MinMax, Point, Rgba, SampleKind, Squiggle, Style, TimeView,
-    TraceSamples,
+    Alignment, Change, ChunkedSamples, Envelope, Id, IqComponent, LagMethod, MinMax, PhenomenologyId, Point,
+    Processing, Rgba, SampleKind, Squiggle, Style, TimeView, Timestamp, TraceSamples,
 };
 
 use crate::plot::line::{self, SquiggleLineMaterial};
+use crate::strips;
 use crate::plot::{Plot, PlotMode, TRACK_LABEL_WIDTH};
 use crate::workspace::{SampleState, UNASSIGNED_COLOR, Workspace};
 
@@ -32,18 +39,40 @@ const Z_STEP: f32 = 0.001;
 const ZOOM_PER_POINT: f64 = 1.0019;
 /// Largest window handed to a transform.
 pub const MAX_TRANSFORM_SAMPLES: usize = 1 << 20;
+/// A shift snaps to a correlation peak within this many pixels.
+const SNAP_PX: f64 = 8.0;
+/// Weakest correlation offered as a snap target.
+const SNAP_MIN: f64 = 0.3;
+/// Analysis samples behind snap targets; keeps the drag start responsive.
+const SNAP_SAMPLES: usize = 1 << 16;
+pub const NFFT_CHOICES: [usize; 6] = [64, 128, 256, 512, 1024, 2048];
 
 const GRID_COLOR: egui::Color32 = egui::Color32::from_gray(45);
 const AXIS_COLOR: egui::Color32 = egui::Color32::from_gray(200);
 const CURSOR_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 215, 0);
 const SELECTED_FILL: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 60, 60, 120);
+const SHIFT_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 140, 60);
 
 pub struct TracksPlugin;
 
 impl Plugin for TracksPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TrackView>()
-            .add_systems(Update, (sync_tracks, request_series, poll_series, layout_rows, draw_tracks).chain());
+            .add_systems(
+                Update,
+                (
+                    sync_tracks,
+                    request_series,
+                    poll_series,
+                    layout_rows,
+                    draw_tracks,
+                    strips::prune_strips,
+                    strips::request_strips,
+                    strips::poll_strips,
+                    strips::draw_strips,
+                )
+                    .chain(),
+            );
     }
 }
 
@@ -91,6 +120,32 @@ impl YScale {
     }
 }
 
+/// What a row shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RowDisplay {
+    #[default]
+    Waveform,
+    Spectrogram,
+    /// Waveform over its spectrogram.
+    Both,
+}
+
+impl RowDisplay {
+    pub const ALL: [Self; 3] = [Self::Waveform, Self::Spectrogram, Self::Both];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Waveform => "Waveform",
+            Self::Spectrogram => "Spectrogram",
+            Self::Both => "Waveform over spectrogram",
+        }
+    }
+
+    pub fn has_spectrogram(self) -> bool {
+        self != Self::Waveform
+    }
+}
+
 #[derive(Resource)]
 pub struct TrackView {
     pub time: TimeView,
@@ -100,8 +155,13 @@ pub struct TrackView {
     pub scroll: f64,
     pub order: RowOrder,
     pub fit_requested: bool,
+    /// Plot samples without their processing.
+    pub show_raw: bool,
+    /// Trace others align to, and snap to while shifting.
+    pub reference: Option<Id>,
     /// Row whose context menu is open.
     menu_track: Option<Entity>,
+    drag: Option<ShiftDrag>,
 }
 
 impl Default for TrackView {
@@ -112,25 +172,57 @@ impl Default for TrackView {
             scroll: 0.0,
             order: RowOrder::default(),
             fit_requested: false,
+            show_raw: false,
+            reference: None,
             menu_track: None,
+            drag: None,
         }
     }
 }
 
-/// A trace's plotted series: real samples, or one component of I/Q.
+/// A Shift+drag in progress.
+struct ShiftDrag {
+    entity: Entity,
+    /// Unsnapped shift, seconds.
+    raw: f64,
+    /// Shifts that align with the reference, with their correlation.
+    snaps: Vec<(f64, f64)>,
+    snapped: Option<f64>,
+}
+
+/// A trace's plotted series: processed real samples, or one component of
+/// processed I/Q.
 pub struct Series {
     pub component: IqComponent,
+    pub processing: Processing,
+    /// Processed samples, all components.
+    pub samples: TraceSamples,
     pub values: ChunkedSamples,
     pub envelope: Envelope,
     pub full: MinMax,
+    /// Why processing fell back to raw samples.
+    pub error: Option<String>,
 }
 
 impl Series {
-    fn build(samples: &TraceSamples, component: IqComponent) -> Self {
+    fn build(raw: &TraceSamples, component: IqComponent, processing: Processing, rate: f64) -> Self {
+        let (samples, error) = match raw.processed(&processing, rate) {
+            Ok(samples) => (samples, None),
+            Err(error) => (raw.clone(), Some(error.to_string())),
+        };
         let values = samples.series(component);
         let envelope = Envelope::build(&values);
         let full = envelope.range(&values, 0, values.len());
-        Self { component, values, envelope, full }
+        Self { component, processing, samples, values, envelope, full, error }
+    }
+
+    /// Samples covering `from..to` seconds of a trace starting at `start`, as
+    /// a contiguous copy and its start time.
+    pub fn window(&self, start: f64, rate: f64, from: f64, to: f64) -> (Vec<f32>, f64) {
+        let index = |t: f64| ((t - start) * rate).clamp(0.0, self.values.len() as f64);
+        let lo = index(from).floor() as usize;
+        let hi = (index(to).ceil() as usize + 1).min(self.values.len());
+        (self.values.range(lo, hi).collect(), start + lo as f64 / rate)
     }
 }
 
@@ -148,9 +240,18 @@ pub struct Track {
     pub trace: Id,
     pub code: String,
     pub phenomenology: Option<String>,
+    pub phenomenology_id: Option<PhenomenologyId>,
     pub color: Rgba,
-    /// Clock-corrected start, seconds from the project reference.
+    /// Aligned start (clock correction plus offset), seconds from the project reference.
     pub start: f64,
+    /// Alignment offset included in `start`.
+    pub offset: f64,
+    pub locked: bool,
+    pub processing: Processing,
+    /// Uncommitted shift while dragging, seconds.
+    pub preview: f64,
+    pub display: RowDisplay,
+    pub nfft: usize,
     pub rate: f64,
     pub len: usize,
     pub kind: SampleKind,
@@ -166,8 +267,25 @@ pub struct Track {
 }
 
 impl Track {
+    /// Where the row is drawn: aligned start plus any drag preview.
+    pub fn drawn_start(&self) -> f64 {
+        self.start + self.preview
+    }
+
     pub fn end(&self) -> f64 {
-        self.start + self.len as f64 / self.rate
+        self.drawn_start() + self.len as f64 / self.rate
+    }
+
+    /// Processing the series should carry.
+    fn wanted_processing(&self, view: &TrackView) -> Processing {
+        if view.show_raw { Processing::default() } else { self.processing }
+    }
+
+    /// The trace as an aligner input over `from..to` seconds.
+    pub fn window(&self, from: f64, to: f64) -> Option<(Vec<f32>, f64)> {
+        let series = self.series.as_ref()?;
+        let (values, start) = series.window(self.drawn_start(), self.rate, from, to);
+        (values.len() > 1).then_some((values, start))
     }
 
     /// The component to plot; real traces ignore it.
@@ -179,8 +297,8 @@ impl Track {
     }
 
     /// Sample indices covering `from..to` seconds, clamped to the trace.
-    fn indices(&self, from: f64, to: f64) -> (usize, usize) {
-        let index = |t: f64| ((t - self.start) * self.rate).clamp(0.0, self.len as f64);
+    pub fn indices(&self, from: f64, to: f64) -> (usize, usize) {
+        let index = |t: f64| ((t - self.drawn_start()) * self.rate).clamp(0.0, self.len as f64);
         (index(from).floor() as usize, (index(to).ceil() as usize + 1).min(self.len))
     }
 
@@ -206,7 +324,7 @@ impl Track {
             .range(lo, hi)
             .enumerate()
             .filter(|(_, v)| v.is_finite())
-            .map(|(i, v)| Point::new(self.start + (lo + i) as f64 / self.rate, f64::from(v)));
+            .map(|(i, v)| Point::new(self.drawn_start() + (lo + i) as f64 / self.rate, f64::from(v)));
         let mut squiggle = Squiggle::with_points(self.name(), points).with_style(Style::new(self.color, 1.5));
         squiggle.trace = Some(self.trace);
         Ok(squiggle)
@@ -215,6 +333,17 @@ impl Track {
 
 #[derive(Component)]
 pub struct SeriesTask(Task<Series>);
+
+struct Described {
+    code: String,
+    phenomenology: Option<String>,
+    phenomenology_id: Option<PhenomenologyId>,
+    color: Rgba,
+    start: f64,
+    offset: f64,
+    locked: bool,
+    processing: Processing,
+}
 
 /// Spawns, updates and despawns tracks to match the workspace's loaded traces.
 #[allow(clippy::too_many_arguments)]
@@ -237,27 +366,42 @@ fn sync_tracks(
     let describe = |trace: &squiggle_core::Trace| {
         let reference = project.reference.unwrap_or(trace.start);
         let phenomenology = project.trace_phenomenology(trace);
-        (
-            project.sensor(trace.sensor).map_or("?", |s| s.code.as_str()).to_string(),
-            phenomenology.map(|p| p.name.clone()),
-            phenomenology.map_or(UNASSIGNED_COLOR, |p| p.color),
-            project.corrected_start(trace).seconds_since(reference),
-        )
+        Described {
+            code: project.sensor(trace.sensor).map_or("?", |s| s.code.as_str()).to_string(),
+            phenomenology: phenomenology.map(|p| p.name.clone()),
+            phenomenology_id: phenomenology.map(|p| p.id.clone()),
+            color: phenomenology.map_or(UNASSIGNED_COLOR, |p| p.color),
+            start: project.aligned_start(trace).seconds_since(reference),
+            offset: trace.offset(),
+            locked: trace.is_locked(),
+            processing: trace.processing,
+        }
     };
 
+    let dragging = view.drag.as_ref().map(|d| d.entity);
     let mut present = HashSet::new();
     for (entity, mut track) in &mut tracks {
         match (project.trace(track.trace), workspace.samples.get(&track.trace)) {
             (Some(trace), Some(SampleState::Loaded(_))) => {
                 present.insert(track.trace);
-                let (code, phenomenology, color, start) = describe(trace);
-                track.code = code;
-                track.phenomenology = phenomenology;
-                track.color = color;
-                track.start = start;
+                let d = describe(trace);
+                track.code = d.code;
+                track.phenomenology = d.phenomenology;
+                track.phenomenology_id = d.phenomenology_id;
+                track.color = d.color;
+                track.start = d.start;
+                track.offset = d.offset;
+                track.locked = d.locked;
+                track.processing = d.processing;
+                if dragging != Some(entity) {
+                    track.preview = 0.0;
+                }
             }
             _ => commands.entity(entity).despawn(),
         }
+    }
+    if view.reference.is_some_and(|id| project.trace(id).is_none()) {
+        view.reference = None;
     }
 
     let had_tracks = !present.is_empty();
@@ -269,15 +413,22 @@ fn sync_tracks(
         if present.contains(&trace.id) {
             continue;
         }
-        let (code, phenomenology, color, start) = describe(trace);
-        let material = materials.add(SquiggleLineMaterial::new(color, LINE_WIDTH, plot.scale_factor));
+        let d = describe(trace);
+        let material = materials.add(SquiggleLineMaterial::new(d.color, LINE_WIDTH, plot.scale_factor));
         commands.spawn((
             Track {
                 trace: trace.id,
-                code,
-                phenomenology,
-                color,
-                start,
+                code: d.code,
+                phenomenology: d.phenomenology,
+                phenomenology_id: d.phenomenology_id,
+                color: d.color,
+                start: d.start,
+                offset: d.offset,
+                locked: d.locked,
+                processing: d.processing,
+                preview: 0.0,
+                display: RowDisplay::default(),
+                nfft: 256,
                 rate: trace.sample_rate,
                 len: samples.len(),
                 kind: samples.kind(),
@@ -302,22 +453,24 @@ fn sync_tracks(
     }
 }
 
-/// Builds each track's series off-thread when missing or its component changed.
+/// Builds each track's series off-thread when missing or its component or
+/// processing changed.
 fn request_series(
     mut commands: Commands,
     workspace: Res<Workspace>,
+    view: Res<TrackView>,
     tracks: Query<(Entity, &Track), Without<SeriesTask>>,
 ) {
     for (entity, track) in &tracks {
-        let wanted = track.wanted();
-        if track.series.as_ref().is_some_and(|s| s.component == wanted) {
+        let (component, processing) = (track.wanted(), track.wanted_processing(&view));
+        if track.series.as_ref().is_some_and(|s| s.component == component && s.processing == processing) {
             continue;
         }
         let Some(SampleState::Loaded(samples)) = workspace.samples.get(&track.trace) else {
             continue;
         };
-        let samples = samples.clone();
-        let task = AsyncComputeTaskPool::get().spawn(async move { Series::build(&samples, wanted) });
+        let (samples, rate) = (samples.clone(), track.rate);
+        let task = AsyncComputeTaskPool::get().spawn(async move { Series::build(&samples, component, processing, rate) });
         commands.entity(entity).insert(SeriesTask(task));
     }
 }
@@ -346,7 +499,9 @@ fn layout_rows(plot: Res<Plot>, mode: Res<PlotMode>, mut view: ResMut<TrackView>
             key(a).cmp(&key(b))
         }),
         RowOrder::Sensor => rows.sort_by(|a, b| a.code.cmp(&b.code)),
-        RowOrder::Start => rows.sort_by(|a, b| a.start.total_cmp(&b.start).then_with(|| a.code.cmp(&b.code))),
+        RowOrder::Start => {
+            rows.sort_by(|a, b| a.drawn_start().total_cmp(&b.drawn_start()).then_with(|| a.code.cmp(&b.code)))
+        }
     }
 
     let area = &plot.view;
@@ -363,7 +518,7 @@ fn layout_rows(plot: Res<Plot>, mode: Res<PlotMode>, mut view: ResMut<TrackView>
 
     if view.fit_requested {
         view.fit_requested = false;
-        let from = rows.iter().map(|t| t.start).fold(f64::INFINITY, f64::min);
+        let from = rows.iter().map(|t| t.drawn_start()).fold(f64::INFINITY, f64::min);
         let to = rows.iter().map(|t| t.end()).fold(f64::NEG_INFINITY, f64::max);
         view.time.fit(from, to, area.plot_width());
     }
@@ -393,7 +548,8 @@ fn draw_tracks(
     let width = area.plot_width();
     let active = *mode == PlotMode::Tracks && plot.is_usable();
     for (entity, mut track, mut transform, mut visibility, material) in &mut tracks {
-        let (Some(series), Some((top, height)), true) = (track.series.clone(), track.row, active) else {
+        let waveform = track.display != RowDisplay::Spectrogram;
+        let (Some(series), Some((top, height)), true, true) = (track.series.clone(), track.row, active, waveform) else {
             *visibility = Visibility::Hidden;
             continue;
         };
@@ -441,7 +597,7 @@ fn draw_tracks(
         };
         let pixels_per_unit = height * ROW_FILL * view.gain / half;
         let row_centre = top + height / 2.0;
-        let cache_start = track.start + cache.lo as f64 / track.rate;
+        let cache_start = track.drawn_start() + cache.lo as f64 / track.rate;
         *transform = Transform {
             translation: Vec3::new(
                 (area.insets.left + view.time.x_of(cache_start) - area.width / 2.0) as f32,
@@ -469,9 +625,34 @@ fn color32(color: Rgba) -> egui::Color32 {
     egui::Color32::from_rgb(byte(color.red), byte(color.green), byte(color.blue))
 }
 
+fn manual(workspace: &Workspace) -> Provenance {
+    Provenance::Manual { analyst: workspace.analyst.clone(), at: Timestamp::now() }
+}
+
+/// A manual alignment at `offset_s`, locked against automatic re-runs.
+pub fn shift_change(workspace: &Workspace, trace: Id, offset_s: f64) -> Change {
+    let alignment = Alignment { offset_s, provenance: manual(workspace), locked: true };
+    Change::SetAlignment { trace, alignment: Some(alignment), revert: false }
+}
+
 /// Per-track options, shown from a right-click on its row or label.
-fn track_menu(ui: &mut egui::Ui, track: &mut Track, view: &mut TrackView, width: f64) {
+fn track_menu(ui: &mut egui::Ui, track: &mut Track, view: &mut TrackView, workspace: &mut Workspace, width: f64) {
     ui.label(egui::RichText::new(&track.code).strong());
+    ui.separator();
+    ui.label("Show");
+    for display in RowDisplay::ALL {
+        ui.radio_value(&mut track.display, display, display.label());
+    }
+    if track.display.has_spectrogram() {
+        ui.horizontal(|ui| {
+            ui.label("FFT size");
+            egui::ComboBox::from_id_salt("nfft").selected_text(track.nfft.to_string()).show_ui(ui, |ui| {
+                for n in NFFT_CHOICES {
+                    ui.selectable_value(&mut track.nfft, n, n.to_string());
+                }
+            });
+        });
+    }
     ui.separator();
     ui.label("Y scale");
     for scale in YScale::ALL {
@@ -490,11 +671,67 @@ fn track_menu(ui: &mut egui::Ui, track: &mut Track, view: &mut TrackView, width:
             ui.radio_value(&mut track.component, component, component.label());
         }
     }
+
     ui.separator();
-    if ui.button("Fit time to this trace").clicked() {
-        view.time.fit(track.start, track.end(), width);
+    let is_reference = view.reference == Some(track.trace);
+    if ui.add_enabled(!is_reference, egui::Button::new("Use as alignment reference")).clicked() {
+        view.reference = Some(track.trace);
         ui.close();
     }
+    let alignment = workspace.project.trace(track.trace).and_then(|t| t.alignment.clone());
+    if let Some(alignment) = alignment {
+        let label = if alignment.locked { "Unlock offset" } else { "Lock offset" };
+        if ui.button(label).on_hover_text("Locked offsets are left alone by automatic alignment").clicked() {
+            let next = Alignment { provenance: manual(workspace), locked: !alignment.locked, ..alignment };
+            let verb = if next.locked { "Lock" } else { "Unlock" };
+            let change = Change::SetAlignment { trace: track.trace, alignment: Some(next), revert: false };
+            workspace.execute_or_report(format!("{verb} {}", track.code), vec![change]);
+            ui.close();
+        }
+        if ui.button("Reset offset").clicked() {
+            let change = Change::SetAlignment { trace: track.trace, alignment: None, revert: false };
+            workspace.execute_or_report(format!("Reset {}", track.code), vec![change]);
+            ui.close();
+        }
+    }
+    ui.separator();
+    if ui.button("Fit time to this trace").clicked() {
+        view.time.fit(track.drawn_start(), track.end(), width);
+        ui.close();
+    }
+}
+
+/// Shifts that line `entity` up with the reference over the visible window.
+fn snap_targets(view: &TrackView, tracks: &Query<(Entity, &mut Track, Has<SeriesTask>)>, entity: Entity, width: f64) -> Vec<(f64, f64)> {
+    let Some(reference) = view.reference else {
+        return Vec::new();
+    };
+    let Ok((_, dragged, _)) = tracks.get(entity) else {
+        return Vec::new();
+    };
+    let Some((_, anchor, _)) = tracks.iter().find(|(_, t, _)| t.trace == reference) else {
+        return Vec::new();
+    };
+    if anchor.trace == dragged.trace || anchor.phenomenology_id.is_none() || anchor.phenomenology_id != dragged.phenomenology_id {
+        return Vec::new();
+    }
+    let from = view.time.start.max(anchor.drawn_start());
+    let to = view.time.end(width).min(anchor.end());
+    if to <= from {
+        return Vec::new();
+    }
+    let max_lag_s = (to - from) / 2.0;
+    let margin = 64.0 / anchor.rate.min(dragged.rate);
+    let (Some((a, a_start)), Some((b, b_start))) = (
+        anchor.window(from - margin, to + margin),
+        dragged.window(from - max_lag_s - margin, to + max_lag_s + margin),
+    ) else {
+        return Vec::new();
+    };
+    let settings = AlignSettings { method: LagMethod::CrossCorrelation, from, to, max_lag_s, max_samples: SNAP_SAMPLES };
+    let a = Channel { values: &a, rate: anchor.rate, start: a_start };
+    let b = Channel { values: &b, rate: dragged.rate, start: b_start };
+    candidates(&a, &b, &settings, SNAP_MIN).into_iter().map(|(lag, r)| (-lag, r)).collect()
 }
 
 /// Labels, time axis, cursor and mouse handling for the tracks view.
@@ -502,7 +739,7 @@ pub fn tracks_ui(
     mut contexts: EguiContexts,
     plot: Res<Plot>,
     mode: Res<PlotMode>,
-    workspace: Res<Workspace>,
+    mut workspace: ResMut<Workspace>,
     mut view: ResMut<TrackView>,
     mut tracks: Query<(Entity, &mut Track, Has<SeriesTask>)>,
 ) -> Result {
@@ -552,7 +789,7 @@ pub fn tracks_ui(
         if label_response.clicked() {
             track.selected = !track.selected;
         }
-        label_response.context_menu(|ui| track_menu(ui, &mut track, &mut view, width));
+        label_response.context_menu(|ui| track_menu(ui, &mut track, &mut view, &mut workspace, width));
 
         let clip = painter.with_clip_rect(label.intersect(area.with_min_x(full.min.x)));
         if track.selected {
@@ -561,7 +798,8 @@ pub fn tracks_ui(
         clip.rect_filled(egui::Rect::from_x_y_ranges(label.min.x + 2.0..=label.min.x + 6.0, y.shrink(3.0)), 1.0, color32(track.color));
         let x = label.min.x + 12.0;
         let mut line_y = y.min + 4.0;
-        clip.text(egui::pos2(x, line_y), egui::Align2::LEFT_TOP, &track.code, egui::FontId::proportional(12.0), egui::Color32::WHITE);
+        let title = if view.reference == Some(track.trace) { format!("★ {}", track.code) } else { track.code.clone() };
+        clip.text(egui::pos2(x, line_y), egui::Align2::LEFT_TOP, title, egui::FontId::proportional(12.0), egui::Color32::WHITE);
         line_y += 15.0;
         let (phenomenology, color) = match &track.phenomenology {
             Some(name) => (name.as_str(), color32(track.color)),
@@ -575,6 +813,35 @@ pub fn tracks_ui(
             detail.push_str(" · building…");
         }
         clip.text(egui::pos2(x, line_y), egui::Align2::LEFT_TOP, detail, small.clone(), color);
+        if track.display.has_spectrogram() {
+            let nyquist = trim_number(track.rate / 2.0);
+            let (high, low) = match track.kind {
+                SampleKind::Real => (format!("{nyquist} Hz"), "0 Hz".to_string()),
+                SampleKind::Complex => (format!("+{nyquist} Hz"), format!("−{nyquist} Hz")),
+            };
+            let scale = painter.with_clip_rect(area);
+            let gray = egui::Color32::from_gray(190);
+            scale.text(egui::pos2(area.max.x - 4.0, y.min + 2.0), egui::Align2::RIGHT_TOP, high, mono.clone(), gray);
+            scale.text(egui::pos2(area.max.x - 4.0, y.max - 2.0), egui::Align2::RIGHT_BOTTOM, low, mono.clone(), gray);
+        }
+        line_y += 14.0;
+        if y.span() >= 52.0 {
+            let mut state = Vec::new();
+            let shift = track.offset + track.preview;
+            if shift != 0.0 {
+                state.push(format!("Δ{} s{}", signed(shift), if track.locked { " 🔒" } else { "" }));
+            }
+            if !track.processing.is_identity() {
+                state.push(if view.show_raw { "raw".to_string() } else { track.processing.describe() });
+            }
+            if let Some(error) = track.series.as_ref().and_then(|s| s.error.as_ref()) {
+                state.push(format!("⚠ {error}"));
+            }
+            if !state.is_empty() {
+                let color = if track.preview != 0.0 { SHIFT_COLOR } else { egui::Color32::from_gray(160) };
+                clip.text(egui::pos2(x, line_y), egui::Align2::LEFT_TOP, state.join(" · "), small.clone(), color);
+            }
+        }
     }
 
     // Time axis.
@@ -617,12 +884,67 @@ pub fn tracks_ui(
             view.gain = (view.gain * f64::from(zoom)).clamp(1e-3, 1e6);
         }
     }
+    let row_at = |y: f32| rows.iter().find(|(_, r)| r.contains(y)).map(|(e, _)| *e);
+    let (shift_held, alt_held) = ctx.input(|i| (i.modifiers.shift, i.modifiers.alt));
+
+    // Shift+drag a row: shift the trace in time, snapping to correlation
+    // peaks against the reference (Alt disables snapping).
+    if response.drag_started()
+        && shift_held
+        && let Some(entity) = pointer.and_then(|p| row_at(p.y))
+    {
+        let snaps = snap_targets(&view, &tracks, entity, width);
+        view.drag = Some(ShiftDrag { entity, raw: 0.0, snaps, snapped: None });
+    }
     if response.dragged() {
         let delta = response.drag_delta();
-        view.time.pan(f64::from(delta.x));
-        view.scroll -= f64::from(delta.y);
+        let px_per_s = view.time.px_per_s;
+        match &mut view.drag {
+            Some(drag) => {
+                drag.raw += f64::from(delta.x) / px_per_s;
+                let snap = (!alt_held)
+                    .then(|| drag.snaps.iter().find(|(s, _)| ((s - drag.raw) * px_per_s).abs() < SNAP_PX))
+                    .flatten();
+                drag.snapped = snap.map(|(_, r)| *r);
+                let preview = snap.map_or(drag.raw, |(s, _)| *s);
+                if let Ok((_, mut track, _)) = tracks.get_mut(drag.entity) {
+                    track.preview = preview;
+                }
+            }
+            None => {
+                view.time.pan(f64::from(delta.x));
+                view.scroll -= f64::from(delta.y);
+            }
+        }
     }
-    let row_at = |y: f32| rows.iter().find(|(_, r)| r.contains(y)).map(|(e, _)| *e);
+    if response.drag_stopped()
+        && let Some(drag) = view.drag.take()
+        && let Ok((_, mut track, _)) = tracks.get_mut(drag.entity)
+        && track.preview != 0.0
+    {
+        let change = shift_change(&workspace, track.trace, track.offset + track.preview);
+        if !workspace.execute_or_report(format!("Shift {}", track.code), vec![change]) {
+            track.preview = 0.0;
+        }
+    }
+
+    // Arrow keys nudge selected tracks by one sample (ten with Shift).
+    if view.drag.is_none() && !ctx.egui_wants_keyboard_input() {
+        let (left, right) = ctx.input(|i| (i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight)));
+        if left != right {
+            let steps = if shift_held { 10.0 } else { 1.0 } * if right { 1.0 } else { -1.0 };
+            let changes: Vec<Change> = tracks
+                .iter()
+                .filter(|(_, t, _)| t.selected)
+                .map(|(_, t, _)| shift_change(&workspace, t.trace, t.offset + steps / t.rate))
+                .collect();
+            if !changes.is_empty() {
+                let label = format!("Nudge {} sample{}", signed(steps), if steps.abs() == 1.0 { "" } else { "s" });
+                workspace.execute_or_report(label, changes);
+            }
+        }
+    }
+
     if response.double_clicked() {
         view.fit_requested = true;
     } else if response.clicked()
@@ -638,11 +960,25 @@ pub fn tracks_ui(
         if let Some(entity) = view.menu_track
             && let Ok((_, mut track, _)) = tracks.get_mut(entity)
         {
-            track_menu(ui, &mut track, &mut view, width);
+            track_menu(ui, &mut track, &mut view, &mut workspace, width);
         } else {
             ui.close();
         }
     });
+
+    // Shift readout beside the pointer.
+    if let (Some(drag), Some(pointer)) = (&view.drag, pointer)
+        && let Ok((_, track, _)) = tracks.get(drag.entity)
+    {
+        let mut text = format!("Δ{} s", signed(track.offset + track.preview));
+        if let Some(r) = drag.snapped {
+            text.push_str(&format!("  snap r = {r:.2}"));
+        }
+        let galley = painter.layout_no_wrap(text, mono.clone(), SHIFT_COLOR);
+        let rect = egui::Rect::from_min_size(pointer + egui::vec2(12.0, -18.0), galley.size()).expand(3.0);
+        painter.rect_filled(rect, 2.0, egui::Color32::from_black_alpha(200));
+        painter.galley(rect.min + egui::vec2(3.0, 3.0), galley, SHIFT_COLOR);
+    }
 
     // Cursor: shared vertical line, relative and absolute time.
     if let Some(pointer) = pointer.filter(|p| area.contains(*p))
@@ -682,6 +1018,12 @@ fn compact_time(iso: &str) -> String {
     }
 }
 
+/// `+0.8125`, `-3e-9`: a signed shift with up to 9 significant digits.
+fn signed(value: f64) -> String {
+    let text = if value != 0.0 && value.abs() < 1e-3 { format!("{value:+.3e}") } else { format!("{value:+.6}") };
+    if text.contains('e') { text } else { text.trim_end_matches('0').trim_end_matches('.').to_string() }
+}
+
 /// `40`, `0.5`, `1e9` style.
 fn trim_number(value: f64) -> String {
     if value >= 1e6 {
@@ -701,8 +1043,15 @@ mod tests {
             trace: Id::generate(),
             code: "c".into(),
             phenomenology: None,
+            phenomenology_id: None,
             color: Rgba::WHITE,
             start: 10.0,
+            offset: 0.0,
+            locked: false,
+            processing: Processing::default(),
+            preview: 0.0,
+            display: RowDisplay::default(),
+            nfft: 256,
             rate,
             len,
             kind: SampleKind::Real,
@@ -710,7 +1059,12 @@ mod tests {
             y_scale: YScale::default(),
             fixed_half_range: 1.0,
             component: IqComponent::default(),
-            series: Some(Arc::new(Series::build(&TraceSamples::Real(ChunkedSamples::from_vec((0..len).map(|i| i as f32).collect())), IqComponent::default()))),
+            series: Some(Arc::new(Series::build(
+                &TraceSamples::Real(ChunkedSamples::from_vec((0..len).map(|i| i as f32).collect())),
+                IqComponent::default(),
+                Processing::default(),
+                rate,
+            ))),
             row: None,
             index: 0,
             cache: None,
@@ -750,6 +1104,21 @@ mod tests {
     fn timestamps_compact() {
         assert_eq!(compact_time("2024-01-01T07:05:00.000000000Z"), "2024-01-01T07:05:00Z");
         assert_eq!(compact_time("2024-01-01T07:05:00.019500000Z"), "2024-01-01T07:05:00.0195Z");
+    }
+
+    #[test]
+    fn previews_move_the_drawn_window() {
+        let mut t = track(100.0, 1000);
+        t.preview = 1.0;
+        assert_eq!(t.indices(11.0, 12.0), (0, 101));
+        assert_eq!(t.end(), 21.0);
+    }
+
+    #[test]
+    fn shifts_print_signed() {
+        assert_eq!(signed(0.8125), "+0.8125");
+        assert_eq!(signed(-2.0), "-2");
+        assert_eq!(signed(3e-9), "+3.000e-9");
     }
 
     #[test]
