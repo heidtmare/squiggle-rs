@@ -7,6 +7,7 @@
 /// were likewise sRGB. Bevy renders in linear space, so `squiggle-app`
 /// converts on the way to the GPU.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Rgba {
     pub red: f32,
     pub green: f32,

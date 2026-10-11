@@ -1,6 +1,7 @@
 //! The plot's data model: points, the polylines they form, and how to draw them.
 
 use crate::color::Rgba;
+use crate::id::Id;
 use crate::transform::Spectrum;
 use crate::view::{Coord, PlotView};
 
@@ -106,6 +107,8 @@ pub struct Squiggle {
     pub name: String,
     pub style: Style,
     pub selected: bool,
+    /// The trace these points plot, if any.
+    pub trace: Option<Id>,
     points: Vec<Point>,
     bounds: Option<Bounds>,
     /// Set when the squiggle is the output of a Fourier transform, so the
@@ -119,6 +122,7 @@ impl Squiggle {
             name: name.into(),
             style: Style::SQUIGGLE,
             selected: false,
+            trace: None,
             points: Vec::new(),
             bounds: None,
             spectrum: None,

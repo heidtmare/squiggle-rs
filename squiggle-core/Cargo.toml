@@ -3,6 +3,10 @@ name = "squiggle-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Plot model, coordinate math and axis tick generation for Squiggle. No rendering dependencies."
+description = "Plot and project model, coordinate math and transforms for Squiggle. No dependencies by default."
+
+[features]
+serde = ["dep:serde"]
 
 [dependencies]
+serde = { workspace = true, optional = true }

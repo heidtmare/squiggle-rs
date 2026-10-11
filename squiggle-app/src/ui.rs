@@ -14,11 +14,12 @@ use bevy_egui::{
     EguiContext, EguiContexts, EguiGlobalSettings, EguiPrimaryContextPass, PrimaryEguiContext, egui,
 };
 use squiggle_core::{
-    Component, Rgba, Transform, TransformOptions, Wavelet, WaveletOutput, Window as Taper,
+    Component, Project, Rgba, Transform, TransformOptions, Wavelet, WaveletOutput, Window as Taper,
 };
 
 use crate::demo::{self, DemoOptions};
 use crate::plot::{AddSquiggle, FitToData, Plot, PlotCamera, RemoveSquiggle, SquiggleModel};
+use crate::project_ui::{self, ProjectAccess, ProjectWindows};
 use crate::showcase::{LoadScene, Scene, Showcase};
 
 const HANDLE_WIDTH: f32 = 26.0;
@@ -32,8 +33,9 @@ pub struct UiPlugin;
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Chrome>()
+            .init_resource::<ProjectWindows>()
             .add_systems(Startup, setup)
-            .add_systems(EguiPrimaryContextPass, chrome);
+            .add_systems(EguiPrimaryContextPass, (chrome, project_ui::windows).chain());
     }
 }
 
@@ -131,7 +133,7 @@ fn setup(mut commands: Commands, mut egui_settings: ResMut<EguiGlobalSettings>) 
 }
 
 /// Draws the chrome and hands the space left over to the plot camera.
-// A Bevy system declares everything it touches in its signature; nine is what
+// A Bevy system declares everything it touches in its signature; ten is what
 // drawing the whole chrome needs.
 #[allow(clippy::too_many_arguments)]
 fn chrome(
@@ -144,6 +146,7 @@ fn chrome(
     options: Res<DemoOptions>,
     mut showcase: ResMut<Showcase>,
     mut commands: PlotCommands,
+    mut project: ProjectAccess,
 ) -> Result {
     let ctx = contexts.ctx_mut()?.clone();
     ctx.set_visuals(egui::Visuals::dark());
@@ -160,7 +163,7 @@ fn chrome(
 
     let top = egui::Panel::top("squiggle_top")
         .show(&mut root, |ui| {
-            menu_bar(ui, &mut chrome, &mut squiggles, &mut commands);
+            menu_bar(ui, &mut chrome, &mut squiggles, &mut commands, &mut project);
             ui.separator();
             toolbar(ui, &mut plot, &squiggles, &options, &mut commands);
         })
@@ -215,9 +218,12 @@ fn menu_bar(
     chrome: &mut Chrome,
     squiggles: &mut Query<(Entity, &mut SquiggleModel)>,
     commands: &mut PlotCommands,
+    project: &mut ProjectAccess,
 ) {
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("File", |ui| {
+            project_ui::file_menu(ui, project);
+            ui.separator();
             if ui.button("Close").clicked() {
                 commands.exit.write(AppExit::Success);
                 ui.close();
@@ -240,7 +246,10 @@ fn menu_bar(
                 ui.close();
             }
         });
-        ui.menu_button("Transform", |ui| transform_menu(ui, chrome, squiggles, commands));
+        ui.menu_button("Project", |ui| project_ui::project_menu(ui, project));
+        ui.menu_button("Transform", |ui| {
+            transform_menu(ui, chrome, squiggles, commands, &project.workspace.project);
+        });
         ui.menu_button("Demo", |ui| {
             for scene in Scene::ALL {
                 if ui
@@ -267,6 +276,7 @@ fn transform_menu(
     chrome: &mut Chrome,
     squiggles: &Query<(Entity, &mut SquiggleModel)>,
     commands: &mut PlotCommands,
+    project: &Project,
 ) {
     let any_selected = squiggles.iter().any(|(_, model)| model.selected);
     let hint = |transform: &Transform| match transform {
@@ -287,7 +297,7 @@ fn transform_menu(
             .on_hover_text(hint(&transform))
             .on_disabled_hover_text("Select a squiggle to transform");
         if response.clicked() {
-            apply_transform(transform, chrome, squiggles, commands);
+            apply_transform(transform, chrome, squiggles, commands, project);
             ui.close();
         }
     }
@@ -300,17 +310,27 @@ fn transform_menu(
 }
 
 /// Transforms every selected squiggle, adding the results to the plot.
+/// Traces whose sensor has no phenomenology are refused.
 fn apply_transform(
     transform: Transform,
     chrome: &mut Chrome,
     squiggles: &Query<(Entity, &mut SquiggleModel)>,
     commands: &mut PlotCommands,
+    project: &Project,
 ) {
     let settings = &chrome.transforms;
     let mut failures = Vec::new();
     let mut added = false;
 
     for (entity, model) in squiggles.iter().filter(|(_, model)| model.selected) {
+        let unassigned = model
+            .trace
+            .and_then(|id| project.trace(id))
+            .is_some_and(|trace| project.trace_phenomenology(trace).is_none());
+        if unassigned {
+            failures.push(format!("{}: no phenomenology assigned (Project ▸ Sensors…)", model.name));
+            continue;
+        }
         match transform.apply(model, &settings.options) {
             Ok(outputs) => {
                 added |= !outputs.is_empty();
@@ -474,7 +494,7 @@ fn squiggle_list(
     ui.separator();
 
     if squiggles.is_empty() {
-        ui.label("No squiggles yet. Use “Add Squiggle” to make one.");
+        ui.label("No squiggles yet. Import waveforms from the File menu or drop files on the window; “Add Squiggle” makes a demo one.");
         return;
     }
 

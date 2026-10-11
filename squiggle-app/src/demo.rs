@@ -12,6 +12,7 @@ use squiggle_core::{Point, Rgba, Squiggle, Style};
 
 use crate::plot::AddSquiggle;
 use crate::showcase::{self, LoadScene, Scene, Showcase};
+use crate::workspace::WorkspaceRequest;
 
 /// Samples per squiggle, as the Java toolbar used.
 pub const DEFAULT_SAMPLE_COUNT: usize = 1000;
@@ -30,17 +31,31 @@ pub struct DemoOptions {
     pub scene: Option<Scene>,
     /// Save a screenshot here once the plot has settled, then quit.
     pub screenshot: Option<std::path::PathBuf>,
+    /// Project file to open at startup.
+    pub project: Option<std::path::PathBuf>,
+    /// Waveform files to import at startup.
+    pub import: Vec<std::path::PathBuf>,
 }
 
 impl Default for DemoOptions {
     fn default() -> Self {
-        Self { seed_count: 0, sample_count: DEFAULT_SAMPLE_COUNT, scene: None, screenshot: None }
+        Self {
+            seed_count: 0,
+            sample_count: DEFAULT_SAMPLE_COUNT,
+            scene: None,
+            screenshot: None,
+            project: None,
+            import: Vec::new(),
+        }
     }
 }
 
 pub const USAGE: &str = "\
-Usage: squiggle-app [--squiggles N] [--samples N] [--demo SCENE] [--screenshot FILE]
+Usage: squiggle-app [--project FILE] [--squiggles N] [--samples N] [--demo SCENE]
+                    [--screenshot FILE] [WAVEFORM...]
 
+  WAVEFORM...        import these files (WAV, CSV) at startup
+  --project FILE     open a .squiggle project
   --squiggles N      put N squiggles on the plot at startup (default 0)
   --samples N        samples per generated squiggle (default 1000)
   --demo SCENE       open a transform demo: fourier or wavelet
@@ -78,8 +93,15 @@ impl DemoOptions {
                     let path = args.next().ok_or_else(|| format!("{argument} needs a file"))?;
                     options.screenshot = Some(path.into());
                 }
+                "--project" => {
+                    let path = args.next().ok_or_else(|| format!("{argument} needs a file"))?;
+                    options.project = Some(path.into());
+                }
                 "--help" | "-h" => return Err(USAGE.to_string()),
-                other => return Err(format!("unrecognised argument: {other}\n\n{USAGE}")),
+                other if other.starts_with('-') => {
+                    return Err(format!("unrecognised argument: {other}\n\n{USAGE}"));
+                }
+                path => options.import.push(path.into()),
             }
         }
 
@@ -87,8 +109,19 @@ impl DemoOptions {
     }
 }
 
-/// Fills the plot at startup when `--squiggles` or `--demo` asked for it.
-pub fn seed(options: Res<DemoOptions>, mut add: MessageWriter<AddSquiggle>, mut load: MessageWriter<LoadScene>) {
+/// Fills the plot at startup from `--project`, waveform paths, `--squiggles` or `--demo`.
+pub fn seed(
+    options: Res<DemoOptions>,
+    mut add: MessageWriter<AddSquiggle>,
+    mut load: MessageWriter<LoadScene>,
+    mut workspace: MessageWriter<WorkspaceRequest>,
+) {
+    if let Some(path) = &options.project {
+        workspace.write(WorkspaceRequest::Open(path.clone()));
+    }
+    if !options.import.is_empty() {
+        workspace.write(WorkspaceRequest::Import(options.import.clone()));
+    }
     if let Some(scene) = options.scene {
         load.write(LoadScene(scene));
     }
@@ -185,6 +218,13 @@ mod tests {
     #[test]
     fn a_non_numeric_value_is_rejected() {
         assert!(parse(&["--samples", "lots"]).is_err());
+    }
+
+    #[test]
+    fn a_project_and_waveforms_can_be_opened() {
+        let options = parse(&["--project", "p.squiggle", "a.wav", "b.csv"]).expect("parses");
+        assert_eq!(options.project, Some("p.squiggle".into()));
+        assert_eq!(options.import, vec![std::path::PathBuf::from("a.wav"), "b.csv".into()]);
     }
 
     #[test]
