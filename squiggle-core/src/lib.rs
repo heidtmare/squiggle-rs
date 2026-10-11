@@ -12,11 +12,14 @@
 pub mod axis;
 pub mod color;
 pub mod id;
+pub mod lod;
 pub mod phenomenology;
 pub mod project;
+pub mod samples;
 pub mod sensor;
 pub mod squiggle;
 pub mod time;
+pub mod timeline;
 pub mod transform;
 pub mod view;
 
@@ -25,8 +28,11 @@ pub use color::Rgba;
 pub use id::Id;
 pub use phenomenology::{Phenomenology, PhenomenologyId, Propagation, SampleKind, Suggestion};
 pub use project::{Change, Op, Project};
-pub use sensor::{Analyst, ChunkedSamples, Sensor, Trace, TraceSource};
+pub use lod::{Envelope, MinMax};
+pub use samples::{ChunkedSamples, Iq, IqComponent, NumberFormat, RawLayout, SampleBuf, TraceSamples};
+pub use sensor::{Analyst, Sensor, Trace, TraceSource};
 pub use squiggle::{Bounds, Point, Squiggle, Style};
 pub use transform::{Component, Transform, TransformError, TransformOptions, Wavelet, WaveletOutput, Window};
 pub use time::Timestamp;
+pub use timeline::TimeView;
 pub use view::{Coord, Insets, PlotView};

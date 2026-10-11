@@ -14,13 +14,14 @@ use bevy_egui::{
     EguiContext, EguiContexts, EguiGlobalSettings, EguiPrimaryContextPass, PrimaryEguiContext, egui,
 };
 use squiggle_core::{
-    Component, Project, Rgba, Transform, TransformOptions, Wavelet, WaveletOutput, Window as Taper,
+    Component, Project, Rgba, Squiggle, Transform, TransformOptions, Wavelet, WaveletOutput, Window as Taper,
 };
 
 use crate::demo::{self, DemoOptions};
-use crate::plot::{AddSquiggle, FitToData, Plot, PlotCamera, RemoveSquiggle, SquiggleModel};
+use crate::plot::{AddSquiggle, FitToData, Plot, PlotCamera, PlotMode, RemoveSquiggle, SquiggleModel};
 use crate::project_ui::{self, ProjectAccess, ProjectWindows};
 use crate::showcase::{LoadScene, Scene, Showcase};
+use crate::tracks::{self, RowOrder, Track, TrackView};
 
 const HANDLE_WIDTH: f32 = 26.0;
 const SIDEBAR_WIDTH: f32 = 300.0;
@@ -35,7 +36,7 @@ impl Plugin for UiPlugin {
         app.init_resource::<Chrome>()
             .init_resource::<ProjectWindows>()
             .add_systems(Startup, setup)
-            .add_systems(EguiPrimaryContextPass, (chrome, project_ui::windows).chain());
+            .add_systems(EguiPrimaryContextPass, (chrome, tracks::tracks_ui, project_ui::windows).chain());
     }
 }
 
@@ -48,6 +49,14 @@ pub struct PlotCommands<'w> {
     fit: MessageWriter<'w, FitToData>,
     load: MessageWriter<'w, LoadScene>,
     exit: MessageWriter<'w, AppExit>,
+}
+
+/// The tracks view, as the chrome needs it.
+#[derive(SystemParam)]
+pub struct TrackAccess<'w, 's> {
+    mode: ResMut<'w, PlotMode>,
+    view: ResMut<'w, TrackView>,
+    tracks: Query<'w, 's, &'static mut Track>,
 }
 
 /// Which parts of the chrome are open.
@@ -133,8 +142,8 @@ fn setup(mut commands: Commands, mut egui_settings: ResMut<EguiGlobalSettings>) 
 }
 
 /// Draws the chrome and hands the space left over to the plot camera.
-// A Bevy system declares everything it touches in its signature; ten is what
-// drawing the whole chrome needs.
+// A Bevy system declares everything it touches in its signature; eleven is
+// what drawing the whole chrome needs.
 #[allow(clippy::too_many_arguments)]
 fn chrome(
     mut contexts: EguiContexts,
@@ -147,6 +156,7 @@ fn chrome(
     mut showcase: ResMut<Showcase>,
     mut commands: PlotCommands,
     mut project: ProjectAccess,
+    mut tracks: TrackAccess,
 ) -> Result {
     let ctx = contexts.ctx_mut()?.clone();
     ctx.set_visuals(egui::Visuals::dark());
@@ -163,9 +173,9 @@ fn chrome(
 
     let top = egui::Panel::top("squiggle_top")
         .show(&mut root, |ui| {
-            menu_bar(ui, &mut chrome, &mut squiggles, &mut commands, &mut project);
+            menu_bar(ui, &mut chrome, &mut squiggles, &mut commands, &mut project, &mut tracks, &plot);
             ui.separator();
-            toolbar(ui, &mut plot, &squiggles, &options, &mut commands);
+            toolbar(ui, &mut plot, &squiggles, &options, &mut commands, &mut tracks);
         })
         .response
         .rect
@@ -219,6 +229,8 @@ fn menu_bar(
     squiggles: &mut Query<(Entity, &mut SquiggleModel)>,
     commands: &mut PlotCommands,
     project: &mut ProjectAccess,
+    tracks: &mut TrackAccess,
+    plot: &Plot,
 ) {
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("File", |ui| {
@@ -248,7 +260,8 @@ fn menu_bar(
         });
         ui.menu_button("Project", |ui| project_ui::project_menu(ui, project));
         ui.menu_button("Transform", |ui| {
-            transform_menu(ui, chrome, squiggles, commands, &project.workspace.project);
+            let sources = TransformSources { squiggles, tracks, width: plot.view.plot_width() };
+            transform_menu(ui, chrome, sources, commands, &project.workspace.project);
         });
         ui.menu_button("Demo", |ui| {
             for scene in Scene::ALL {
@@ -271,14 +284,64 @@ fn menu_bar(
     });
 }
 
+/// What a transform runs on: selected squiggles in overlay mode, the visible
+/// window of selected tracks in tracks mode.
+struct TransformSources<'a, 'b, 'w, 's, 'q, 'tw, 'ts> {
+    squiggles: &'a Query<'w, 's, (Entity, &'q mut SquiggleModel)>,
+    tracks: &'b mut TrackAccess<'tw, 'ts>,
+    width: f64,
+}
+
+impl TransformSources<'_, '_, '_, '_, '_, '_, '_> {
+    fn any_selected(&self) -> bool {
+        match *self.tracks.mode {
+            PlotMode::Overlay => self.squiggles.iter().any(|(_, model)| model.selected),
+            PlotMode::Tracks => self.tracks.tracks.iter().any(|track| track.selected),
+        }
+    }
+
+    /// `(name, squiggle entity to replace, input or why not)` per selected source.
+    fn inputs(&self, project: &Project) -> Vec<(String, Option<Entity>, Result<Squiggle, String>)> {
+        let unassigned = "no phenomenology assigned (Project ▸ Sensors…)".to_string();
+        match *self.tracks.mode {
+            PlotMode::Overlay => self
+                .squiggles
+                .iter()
+                .filter(|(_, model)| model.selected)
+                .map(|(entity, model)| {
+                    let blocked = model
+                        .trace
+                        .and_then(|id| project.trace(id))
+                        .is_some_and(|trace| project.trace_phenomenology(trace).is_none());
+                    let input = if blocked { Err(unassigned.clone()) } else { Ok(model.0.clone()) };
+                    (model.name.clone(), Some(entity), input)
+                })
+                .collect(),
+            PlotMode::Tracks => self
+                .tracks
+                .tracks
+                .iter()
+                .filter(|track| track.selected)
+                .map(|track| {
+                    let input = match track.phenomenology {
+                        None => Err(unassigned.clone()),
+                        Some(_) => track.window_squiggle(&self.tracks.view.time, self.width),
+                    };
+                    (track.name(), None, input)
+                })
+                .collect(),
+        }
+    }
+}
+
 fn transform_menu(
     ui: &mut egui::Ui,
     chrome: &mut Chrome,
-    squiggles: &Query<(Entity, &mut SquiggleModel)>,
+    mut sources: TransformSources,
     commands: &mut PlotCommands,
     project: &Project,
 ) {
-    let any_selected = squiggles.iter().any(|(_, model)| model.selected);
+    let any_selected = sources.any_selected();
     let hint = |transform: &Transform| match transform {
         Transform::Fourier => "Continuous Fourier integral, honouring uneven sample spacing",
         Transform::Dft => "Discrete Fourier transform, summed directly — slow on long squiggles",
@@ -295,9 +358,9 @@ fn transform_menu(
         let response = ui
             .add_enabled(any_selected, egui::Button::new(transform.label()))
             .on_hover_text(hint(&transform))
-            .on_disabled_hover_text("Select a squiggle to transform");
+            .on_disabled_hover_text("Select a squiggle or track to transform");
         if response.clicked() {
-            apply_transform(transform, chrome, squiggles, commands, project);
+            apply_transform(transform, chrome, &mut sources, commands, project);
             ui.close();
         }
     }
@@ -309,12 +372,12 @@ fn transform_menu(
     }
 }
 
-/// Transforms every selected squiggle, adding the results to the plot.
+/// Transforms every selected source, adding the results to the overlay.
 /// Traces whose sensor has no phenomenology are refused.
 fn apply_transform(
     transform: Transform,
     chrome: &mut Chrome,
-    squiggles: &Query<(Entity, &mut SquiggleModel)>,
+    sources: &mut TransformSources,
     commands: &mut PlotCommands,
     project: &Project,
 ) {
@@ -322,31 +385,27 @@ fn apply_transform(
     let mut failures = Vec::new();
     let mut added = false;
 
-    for (entity, model) in squiggles.iter().filter(|(_, model)| model.selected) {
-        let unassigned = model
-            .trace
-            .and_then(|id| project.trace(id))
-            .is_some_and(|trace| project.trace_phenomenology(trace).is_none());
-        if unassigned {
-            failures.push(format!("{}: no phenomenology assigned (Project ▸ Sensors…)", model.name));
-            continue;
-        }
-        match transform.apply(model, &settings.options) {
+    for (name, entity, input) in sources.inputs(project) {
+        let outputs = input.and_then(|squiggle| transform.apply(&squiggle, &settings.options).map_err(|e| e.to_string()));
+        match outputs {
             Ok(outputs) => {
                 added |= !outputs.is_empty();
                 for output in outputs {
                     commands.add.write(AddSquiggle(output));
                 }
-                if settings.replace_source {
+                if let (true, Some(entity)) = (settings.replace_source, entity) {
                     commands.remove.write(RemoveSquiggle(entity));
                 }
             }
-            Err(error) => failures.push(format!("{}: {error}", model.name)),
+            Err(error) => failures.push(format!("{name}: {error}")),
         }
     }
 
-    if added && settings.fit_after {
-        commands.fit.write(FitToData);
+    if added {
+        *sources.tracks.mode = PlotMode::Overlay;
+        if settings.fit_after {
+            commands.fit.write(FitToData);
+        }
     }
     chrome.transform_error = (!failures.is_empty())
         .then(|| format!("{} failed on\n{}", transform.label(), failures.join("\n")));
@@ -459,18 +518,39 @@ fn toolbar(
     squiggles: &Query<(Entity, &mut SquiggleModel)>,
     options: &DemoOptions,
     commands: &mut PlotCommands,
+    tracks: &mut TrackAccess,
 ) {
     ui.horizontal(|ui| {
+        let mode = &mut *tracks.mode;
+        ui.selectable_value(mode, PlotMode::Tracks, "Tracks")
+            .on_hover_text("Imported traces stacked on a shared time axis");
+        ui.selectable_value(mode, PlotMode::Overlay, "Overlay")
+            .on_hover_text("Free squiggles: demos and transform results");
+        ui.separator();
+
         if ui.button("Add Squiggle").clicked() {
             let index = squiggles.iter().count();
             commands.add.write(AddSquiggle(demo::generate(index, options.sample_count)));
+            *tracks.mode = PlotMode::Overlay;
         }
-        if ui
-            .add_enabled(squiggles.iter().count() > 0, egui::Button::new("Fit"))
-            .on_hover_text("Frame every squiggle")
-            .clicked()
-        {
-            commands.fit.write(FitToData);
+        let (any, hint) = match *tracks.mode {
+            PlotMode::Overlay => (squiggles.iter().count() > 0, "Frame every squiggle"),
+            PlotMode::Tracks => (!tracks.tracks.is_empty(), "Frame every track's time span (or double-click)"),
+        };
+        if ui.add_enabled(any, egui::Button::new("Fit")).on_hover_text(hint).clicked() {
+            match *tracks.mode {
+                PlotMode::Overlay => {
+                    commands.fit.write(FitToData);
+                }
+                PlotMode::Tracks => {
+                    tracks.view.fit_requested = true;
+                    tracks.view.gain = 1.0;
+                }
+            }
+        }
+        if *tracks.mode == PlotMode::Tracks {
+            ui.label("Rows by");
+            choice(ui, "row_order", &mut tracks.view.order, &RowOrder::ALL, |o| o.label());
         }
 
         ui.separator();
@@ -594,9 +674,14 @@ fn about_window(ctx: &egui::Context, chrome: &mut Chrome) {
             ui.label("Squiggle — a waveform plot.");
             ui.label("A Rust and Bevy port of the original JavaFX application.");
             ui.separator();
+            ui.strong("Tracks");
+            ui.label("Scroll to zoom time, drag to pan time and rows, pinch or Control-scroll to scale amplitude.");
+            ui.label("Click a row to select it; right-click for its y scale and I/Q component. Double-click to fit.");
+            ui.strong("Overlay");
             ui.label("Drag to pan. Scroll to zoom — hold Alt to keep the x scale, Control to keep the y scale.");
             ui.label("Click a squiggle to select it and show its samples.");
-            ui.label("Transform turns the selected squiggles into spectra or wavelet levels.");
+            ui.separator();
+            ui.label("Transform turns the selected squiggles, or the visible part of selected tracks, into spectra or wavelet levels.");
         });
 }
 

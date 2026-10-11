@@ -69,6 +69,12 @@ impl Timestamp {
     pub fn min(self, other: Self) -> Self {
         if other < self { other } else { self }
     }
+
+    /// From a year, day of year (1-based) and time of day, as SEED and SAC store it.
+    pub fn from_ordinal(year: i64, day_of_year: u32, hour: u32, minute: u32, second: u32, frac: f64) -> Self {
+        let days = days_from_civil(year, 1, 1) + i64::from(day_of_year) - 1;
+        Self::new(days * 86_400 + i64::from(hour * 3600 + minute * 60 + second), frac)
+    }
 }
 
 /// Days since 1970-01-01 to (year, month, day). Hinnant's `civil_from_days`.
@@ -220,6 +226,12 @@ mod tests {
     fn bare_unix_seconds_parse() {
         let t: Timestamp = "86400.5".parse().unwrap();
         assert_eq!(t.to_string(), "1970-01-02T00:00:00.500000000Z");
+    }
+
+    #[test]
+    fn ordinal_dates_resolve() {
+        let t = Timestamp::from_ordinal(2024, 60, 1, 2, 3, 0.5);
+        assert_eq!(t.to_string(), "2024-02-29T01:02:03.500000000Z");
     }
 
     #[test]

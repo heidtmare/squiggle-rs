@@ -1,5 +1,4 @@
-//! The open project: its op log, its store, loaded samples, and the squiggles
-//! that plot its traces.
+//! The open project: its op log, its store and its loaded samples.
 //!
 //! File dialogs, file reads and sample loads run as tasks; systems here poll
 //! them and fold results into [`Workspace`] and [`ImportQueue`].
@@ -12,16 +11,15 @@ use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, IoTaskPool, Task, futures::check_ready};
 use bevy::window::FileDragAndDrop;
 use squiggle_core::{
-    Analyst, Change, ChunkedSamples, Id, Op, PhenomenologyId, Point, Project, Rgba, Squiggle, Style, Suggestion,
-    Timestamp, Trace, TraceSource,
+    Analyst, Change, Id, Op, PhenomenologyId, Project, RawLayout, Rgba, SampleBuf, Suggestion, Timestamp, Trace,
+    TraceSamples, TraceSource,
 };
-use squiggle_io::{FileRead, PROJECT_EXTENSION, ProjectStore, SqliteStore};
+use squiggle_io::{FileRead, PROJECT_EXTENSION, ProjectStore, ReadError, SqliteStore};
 
-use crate::plot::{AddSquiggle, FitToData, MeshOutOfDate, Plot, RemoveSquiggle, SquiggleModel};
+use crate::plot::Plot;
 
 /// Colour of traces whose sensor has no phenomenology yet.
 pub const UNASSIGNED_COLOR: Rgba = Rgba::new(0.6, 0.6, 0.6);
-const TRACE_LINE_WIDTH: f32 = 1.5;
 
 pub struct WorkspacePlugin;
 
@@ -33,7 +31,7 @@ impl Plugin for WorkspacePlugin {
             .add_message::<WorkspaceRequest>()
             .add_systems(
                 Update,
-                (handle_drops, handle_requests, poll_dialog, poll_reads, poll_loads, sync_trace_squiggles).chain(),
+                (handle_drops, handle_requests, poll_dialog, poll_reads, poll_loads, sync_title).chain(),
             );
     }
 }
@@ -48,6 +46,8 @@ pub enum WorkspaceRequest {
     SaveAs(PathBuf),
     ImportDialog,
     Import(Vec<PathBuf>),
+    /// Decodes headerless files with an analyst-supplied layout.
+    ImportRaw(Vec<PathBuf>, RawLayout),
     /// Re-issues a request that was held back by the unsaved-project prompt.
     Discard(Box<WorkspaceRequest>),
 }
@@ -61,7 +61,7 @@ impl WorkspaceRequest {
 
 pub enum SampleState {
     Loading,
-    Loaded(ChunkedSamples),
+    Loaded(TraceSamples),
     Failed(String),
 }
 
@@ -127,6 +127,11 @@ impl Workspace {
         self.path.is_none() && self.log.len() > self.created_ops
     }
 
+    /// Bumped on every change the plot must reflect.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub fn title(&self) -> String {
         match &self.path {
             Some(path) => {
@@ -177,7 +182,7 @@ pub struct ImportRow {
     pub file: String,
     pub code: String,
     pub source: TraceSource,
-    pub samples: Vec<f32>,
+    pub samples: SampleBuf,
     /// Editable; parsed on confirm.
     pub start: String,
     /// Where the start text came from.
@@ -194,11 +199,29 @@ pub struct ImportQueue {
     pub rows: Vec<ImportRow>,
     /// Files that could not be read.
     pub failures: Vec<String>,
+    /// Files no reader recognised, awaiting a raw layout.
+    pub raw_pending: Vec<PathBuf>,
+    pub raw_layout: RawLayout,
 }
 
 impl ImportQueue {
     pub fn is_open(&self) -> bool {
-        !self.rows.is_empty() || !self.failures.is_empty()
+        !self.rows.is_empty() || !self.failures.is_empty() || !self.raw_pending.is_empty()
+    }
+
+    fn push_raw(&mut self, path: PathBuf, project: &Project) {
+        if self.raw_pending.is_empty() {
+            // Most recent layout used in this project, else the last one entered.
+            let used = project.traces().iter().rev().find_map(|t| match &t.source {
+                TraceSource::File { layout, .. } => *layout,
+            });
+            if let Some(layout) = used {
+                self.raw_layout = layout;
+            }
+        }
+        if !self.raw_pending.contains(&path) {
+            self.raw_pending.push(path);
+        }
     }
 
     fn push_file(&mut self, read: FileRead, modified: Option<Timestamp>, project: &Project) {
@@ -279,12 +302,20 @@ impl ImportQueue {
                 workspace.commit_or_report(Change::AssignPhenomenology { sensor, phenomenology });
             }
 
-            let trace = Trace { id: Id::generate(), sensor, start, sample_rate, len: row.samples.len(), source: row.source };
+            let trace = Trace {
+                id: Id::generate(),
+                sensor,
+                start,
+                sample_rate,
+                len: row.samples.len(),
+                kind: row.samples.kind(),
+                source: row.source,
+            };
             let id = trace.id;
             if !workspace.commit_or_report(Change::AddTrace(trace)) {
                 break;
             }
-            workspace.samples.insert(id, SampleState::Loaded(ChunkedSamples::from_vec(row.samples)));
+            workspace.samples.insert(id, SampleState::Loaded(row.samples.into()));
             earliest = Some(earliest.map_or(start, |e| e.min(start)));
         }
 
@@ -298,6 +329,7 @@ impl ImportQueue {
     pub fn cancel(&mut self) {
         self.rows.clear();
         self.failures.clear();
+        self.raw_pending.clear();
     }
 }
 
@@ -307,8 +339,14 @@ enum DialogOutcome {
     SaveAs(PathBuf),
 }
 
-type FileOutcome = Result<(FileRead, Option<Timestamp>), String>;
-type SampleLoad = Vec<(Id, Result<Vec<f32>, String>)>;
+enum ReadFailure {
+    /// No reader recognised the file; ask for a raw layout.
+    Unrecognised(PathBuf),
+    Failed(String),
+}
+
+type FileOutcome = Result<(FileRead, Option<Timestamp>), ReadFailure>;
+type SampleLoad = Vec<(Id, Result<TraceSamples, String>)>;
 
 #[derive(Resource, Default)]
 struct Tasks {
@@ -322,17 +360,33 @@ fn project_dialog() -> rfd::AsyncFileDialog {
     rfd::AsyncFileDialog::new().add_filter("Squiggle project", &[PROJECT_EXTENSION])
 }
 
-fn read_files(paths: Vec<PathBuf>) -> Task<Vec<FileOutcome>> {
+fn modified_time(path: &Path) -> Option<Timestamp> {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| Timestamp::new(d.as_secs() as i64, f64::from(d.subsec_nanos()) * 1e-9))
+}
+
+/// Reads files, or with `layout` decodes them as raw binary. A SigMF pair
+/// dropped together is read once.
+fn read_files(paths: Vec<PathBuf>, layout: Option<RawLayout>) -> Task<Vec<FileOutcome>> {
     AsyncComputeTaskPool::get().spawn(async move {
+        let mut seen = HashSet::new();
         paths
             .into_iter()
+            .map(|path| squiggle_io::primary_path(&path))
+            .filter(|path| seen.insert(path.clone()))
             .map(|path| {
-                let modified = std::fs::metadata(&path)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| Timestamp::new(d.as_secs() as i64, f64::from(d.subsec_nanos()) * 1e-9));
-                squiggle_io::read_file(&path).map(|read| (read, modified)).map_err(|e| e.to_string())
+                let read = match layout {
+                    Some(layout) => squiggle_io::read_raw(&path, layout),
+                    None => squiggle_io::read_file(&path),
+                };
+                match read {
+                    Ok(read) => Ok((read, modified_time(&path))),
+                    Err(ReadError::UnknownFormat(path)) => Err(ReadFailure::Unrecognised(path)),
+                    Err(error) => Err(ReadFailure::Failed(error.to_string())),
+                }
             })
             .collect()
     })
@@ -423,13 +477,19 @@ fn handle_requests(
                 tasks.dialog = Some(IoTaskPool::get().spawn(async {
                     let files = rfd::AsyncFileDialog::new()
                         .set_title("Import waveforms")
-                        .add_filter("Waveforms", &["wav", "csv"])
+                        .add_filter("Waveforms", &squiggle_io::EXTENSIONS)
+                        .add_filter("All files (raw binary)", &["*"])
                         .pick_files()
                         .await?;
                     Some(DialogOutcome::Import(files.iter().map(|f| f.path().to_path_buf()).collect()))
                 }));
             }
-            WorkspaceRequest::Import(paths) => tasks.reads.push(read_files(paths.clone())),
+            WorkspaceRequest::Import(paths) => tasks.reads.push(read_files(paths.clone(), None)),
+            WorkspaceRequest::ImportRaw(paths, layout) => {
+                queue.raw_pending.retain(|p| !paths.contains(p));
+                queue.raw_layout = *layout;
+                tasks.reads.push(read_files(paths.clone(), Some(*layout)));
+            }
             WorkspaceRequest::Discard(_) => {}
         }
     }
@@ -463,7 +523,8 @@ fn poll_reads(mut tasks: ResMut<Tasks>, mut queue: ResMut<ImportQueue>, workspac
     for outcome in finished {
         match outcome {
             Ok((read, modified)) => queue.push_file(read, modified, &workspace.project),
-            Err(error) => queue.failures.push(error),
+            Err(ReadFailure::Unrecognised(path)) => queue.push_raw(path, &workspace.project),
+            Err(ReadFailure::Failed(error)) => queue.failures.push(error),
         }
     }
 }
@@ -486,7 +547,7 @@ fn poll_loads(mut tasks: ResMut<Tasks>, mut workspace: ResMut<Workspace>) {
                 continue;
             }
             let state = match result {
-                Ok(samples) => SampleState::Loaded(ChunkedSamples::from_vec(samples)),
+                Ok(samples) => SampleState::Loaded(samples),
                 Err(error) => SampleState::Failed(error),
             };
             workspace.samples.insert(id, state);
@@ -495,78 +556,10 @@ fn poll_loads(mut tasks: ResMut<Tasks>, mut workspace: ResMut<Workspace>) {
     }
 }
 
-/// The squiggle that plots a trace: x in seconds from the project reference.
-fn trace_squiggle(project: &Project, trace: &Trace, samples: &ChunkedSamples) -> Squiggle {
-    let reference = project.reference.unwrap_or(trace.start);
-    let offset = project.corrected_start(trace).seconds_since(reference);
-    let interval = 1.0 / trace.sample_rate;
-    // NaN marks a missing sample; gaps are drawn joined until tracks land.
-    let points = samples
-        .iter()
-        .enumerate()
-        .filter(|(_, y)| y.is_finite())
-        .map(|(i, y)| Point::new(offset + i as f64 * interval, f64::from(y)));
-
-    let code = project.sensor(trace.sensor).map_or("?", |s| s.code.as_str());
-    let color = project.trace_phenomenology(trace).map_or(UNASSIGNED_COLOR, |p| p.color);
-    let mut squiggle =
-        Squiggle::with_points(code.to_string(), points).with_style(Style::new(color, TRACE_LINE_WIDTH));
-    squiggle.trace = Some(trace.id);
-    squiggle
-}
-
-/// Reconciles trace squiggles with the workspace whenever it changes.
-#[allow(clippy::too_many_arguments)]
-fn sync_trace_squiggles(
-    mut commands: Commands,
-    workspace: Res<Workspace>,
-    mut plot: ResMut<Plot>,
-    mut seen: Local<u64>,
-    mut squiggles: Query<(Entity, &mut SquiggleModel)>,
-    mut add: MessageWriter<AddSquiggle>,
-    mut remove: MessageWriter<RemoveSquiggle>,
-    mut fit: MessageWriter<FitToData>,
-) {
-    if *seen == workspace.revision {
-        return;
-    }
-    *seen = workspace.revision;
-    plot.name = workspace.title();
-
-    let project = &workspace.project;
-    let mut plotted = HashSet::new();
-    for (entity, mut model) in &mut squiggles {
-        let Some(id) = model.trace else {
-            continue;
-        };
-        let wanted = match (project.trace(id), workspace.samples.get(&id)) {
-            (Some(trace), Some(SampleState::Loaded(samples))) => trace_squiggle(project, trace, samples),
-            _ => {
-                remove.write(RemoveSquiggle(entity));
-                continue;
-            }
-        };
-        plotted.insert(id);
-        if model.name != wanted.name || model.style != wanted.style {
-            model.name = wanted.name.clone();
-            model.style = wanted.style;
-        }
-        if model.points().first() != wanted.points().first() {
-            model.clear();
-            model.extend(wanted.points().iter().copied());
-            commands.entity(entity).insert(MeshOutOfDate);
-        }
-    }
-
-    let mut added = false;
-    for trace in project.traces() {
-        if let (false, Some(SampleState::Loaded(samples))) = (plotted.contains(&trace.id), workspace.samples.get(&trace.id)) {
-            add.write(AddSquiggle(trace_squiggle(project, trace, samples)));
-            added = true;
-        }
-    }
-    if added {
-        fit.write(FitToData);
+fn sync_title(workspace: Res<Workspace>, mut plot: ResMut<Plot>, mut seen: Local<u64>) {
+    if *seen != workspace.revision {
+        *seen = workspace.revision;
+        plot.name = workspace.title();
     }
 }
 
@@ -584,8 +577,9 @@ mod tests {
                 format: "csv".to_string(),
                 channel: 0,
                 content_hash: "00".to_string(),
+                layout: None,
             },
-            samples: vec![0.0; 4],
+            samples: SampleBuf::Real(vec![0.0; 4]),
             start: start.to_string(),
             start_origin: "file",
             rate: rate.to_string(),
@@ -607,7 +601,7 @@ mod tests {
                 row("BHZ", "2026-10-11T00:00:01Z", "100", Some("seismic")),
                 row("mic", "2026-10-11T00:00:00Z", "48000", None),
             ],
-            failures: vec![],
+            ..ImportQueue::default()
         };
         assert!(queue.confirm(&mut workspace));
         assert!(queue.rows.is_empty());
@@ -626,7 +620,7 @@ mod tests {
         let mut workspace = workspace();
         let mut queue = ImportQueue {
             rows: vec![row("a", "2026-10-11T00:00:00Z", "100", None), row("b", "yesterday", "0", None)],
-            failures: vec![],
+            ..ImportQueue::default()
         };
         assert!(!queue.confirm(&mut workspace));
         assert!(workspace.project.traces().is_empty());
@@ -642,7 +636,7 @@ mod tests {
                 row("s", "2026-10-11T00:00:00Z", "100", Some("seismic")),
                 row("s", "2026-10-11T00:00:00Z", "100", Some("acoustic")),
             ],
-            failures: vec![],
+            ..ImportQueue::default()
         };
         assert!(!queue.confirm(&mut workspace));
     }
@@ -650,7 +644,7 @@ mod tests {
     #[test]
     fn a_second_trace_for_a_known_sensor_reuses_it() {
         let mut workspace = workspace();
-        let mut queue = ImportQueue { rows: vec![row("s", "2026-10-11T00:00:00Z", "100", Some("seismic"))], failures: vec![] };
+        let mut queue = ImportQueue { rows: vec![row("s", "2026-10-11T00:00:00Z", "100", Some("seismic"))], ..ImportQueue::default() };
         assert!(queue.confirm(&mut workspace));
         queue.rows.push(row("s", "2026-10-11T00:01:00Z", "100", Some("seismic")));
         assert!(queue.confirm(&mut workspace));
@@ -659,11 +653,40 @@ mod tests {
     }
 
     #[test]
+    fn complex_rows_become_complex_traces() {
+        let mut workspace = workspace();
+        let mut complex = row("rx", "2026-10-11T00:00:00Z", "1e6", Some("rf"));
+        complex.samples = SampleBuf::Complex(vec![[1.0, 0.0]; 3]);
+        let mut queue = ImportQueue { rows: vec![complex], ..ImportQueue::default() };
+        assert!(queue.confirm(&mut workspace));
+        let trace = &workspace.project.traces()[0];
+        assert_eq!(trace.kind, squiggle_core::SampleKind::Complex);
+        assert!(matches!(workspace.samples.get(&trace.id), Some(SampleState::Loaded(TraceSamples::Complex(_)))));
+    }
+
+    #[test]
+    fn raw_files_reuse_the_projects_last_layout() {
+        let mut workspace = workspace();
+        let layout = RawLayout { channels: 4, big_endian: true, ..RawLayout::default() };
+        let mut raw = row("dump", "2026-10-11T00:00:00Z", "1e9", Some("emp"));
+        let TraceSource::File { layout: slot, .. } = &mut raw.source;
+        *slot = Some(layout);
+        let mut queue = ImportQueue { rows: vec![raw], ..ImportQueue::default() };
+        assert!(queue.confirm(&mut workspace));
+
+        queue.push_raw("a.bin".into(), &workspace.project);
+        queue.push_raw("a.bin".into(), &workspace.project);
+        assert_eq!(queue.raw_pending.len(), 1);
+        assert_eq!(queue.raw_layout, layout);
+        assert!(queue.is_open());
+    }
+
+    #[test]
     fn saving_then_opening_restores_the_project() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("p.squiggle");
         let mut workspace = workspace();
-        let mut queue = ImportQueue { rows: vec![row("s", "2026-10-11T00:00:00Z", "100", Some("rf"))], failures: vec![] };
+        let mut queue = ImportQueue { rows: vec![row("s", "2026-10-11T00:00:00Z", "100", Some("rf"))], ..ImportQueue::default() };
         queue.confirm(&mut workspace);
         workspace.save_as(&path).unwrap();
         assert!(!workspace.is_unsaved());

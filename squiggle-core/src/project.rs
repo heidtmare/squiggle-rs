@@ -259,11 +259,13 @@ mod tests {
             start: Timestamp::new(1_000, 0.0),
             sample_rate: 100.0,
             len: 10,
+            kind: Default::default(),
             source: TraceSource::File {
                 path: "a.wav".to_string(),
                 format: "wav".to_string(),
                 channel: 0,
                 content_hash: "00".to_string(),
+                layout: None,
             },
         }
     }

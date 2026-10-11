@@ -1,18 +1,29 @@
-//! Waveform readers and project persistence.
+//! Waveform readers, sources and project persistence.
 //!
-//! Readers decode whole files (captures are seconds long). Each file is hashed
-//! so a project can detect when a referenced file has changed.
+//! Readers decode whole files (captures are seconds long) and are replayed
+//! through [`FileSource`]. Each file and its companions are hashed so a
+//! project can detect when a referenced file has changed.
 
 mod csv;
+mod decode;
+mod mseed;
+pub mod raw;
+mod sac;
+mod sigmf;
+mod source;
 mod store;
 mod wav;
 
 use core::fmt;
 use std::path::{Path, PathBuf};
 
-use squiggle_core::{Suggestion, Timestamp, TraceSource};
+use squiggle_core::{RawLayout, SampleBuf, Suggestion, Timestamp, TraceSamples, TraceSource};
 
 pub use crate::csv::CsvReader;
+pub use crate::mseed::MseedReader;
+pub use crate::sac::SacReader;
+pub use crate::sigmf::SigmfReader;
+pub use crate::source::{FileSource, Header, SourceEvent, WaveformSource, ingest};
 pub use crate::store::{ProjectStore, SqliteStore, StoreError};
 pub use crate::wav::WavReader;
 
@@ -30,7 +41,7 @@ pub struct Recording {
     pub channel: u32,
     pub start: Option<Timestamp>,
     pub sample_rate: Option<f64>,
-    pub samples: Vec<f32>,
+    pub samples: SampleBuf,
     pub suggestion: Option<Suggestion>,
 }
 
@@ -41,6 +52,8 @@ pub struct FileRead {
     pub format: &'static str,
     pub content_hash: String,
     pub recordings: Vec<Recording>,
+    /// Set for raw binary.
+    pub layout: Option<RawLayout>,
 }
 
 impl FileRead {
@@ -50,6 +63,7 @@ impl FileRead {
             format: self.format.to_string(),
             channel,
             content_hash: self.content_hash.clone(),
+            layout: self.layout,
         }
     }
 }
@@ -90,50 +104,104 @@ pub trait WaveformReader: Send + Sync {
     /// Whether this reader handles the file. `head` is its first bytes.
     fn probe(&self, path: &Path, head: &[u8]) -> bool;
     fn read(&self, path: &Path, bytes: &[u8]) -> Result<Vec<Recording>, ReadError>;
+    /// Other files the read depends on; they are hashed with the primary.
+    fn companions(&self, _path: &Path) -> Vec<PathBuf> {
+        Vec::new()
+    }
 }
 
-pub fn readers() -> [&'static dyn WaveformReader; 2] {
-    [&WavReader, &CsvReader]
+/// Probe order: content signatures first, extensions last. Unrecognised files
+/// fall through to [`read_raw`] with an analyst-supplied layout.
+pub fn readers() -> [&'static dyn WaveformReader; 5] {
+    [&MseedReader, &SacReader, &SigmfReader, &WavReader, &CsvReader]
 }
 
 fn reader(name: &str) -> Option<&'static dyn WaveformReader> {
     readers().into_iter().find(|r| r.name() == name)
 }
 
-pub fn content_hash(bytes: &[u8]) -> String {
-    blake3::hash(bytes).to_hex().to_string()
+/// File extensions offered by the import dialog.
+pub const EXTENSIONS: [&str; 10] = ["mseed", "miniseed", "msd", "sac", "sigmf-meta", "sigmf-data", "wav", "csv", "bin", "raw"];
+
+/// BLAKE3 over `bytes` then each companion file, hex.
+fn content_hash(bytes: &[u8], companions: &[PathBuf]) -> Result<String, ReadError> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(bytes);
+    for companion in companions {
+        hasher.update(&std::fs::read(companion)?);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// The file a reader opens: a `.sigmf-data` path resolves to its `.sigmf-meta`.
+pub fn primary_path(path: &Path) -> PathBuf {
+    if path.extension().is_some_and(|e| e == sigmf::DATA_EXTENSION) {
+        let meta = path.with_extension(sigmf::META_EXTENSION);
+        if meta.exists() {
+            return meta;
+        }
+    }
+    path.to_path_buf()
 }
 
 /// Decodes a file with the first reader that recognises it.
+/// [`ReadError::UnknownFormat`] means the analyst must describe it for [`read_raw`].
 pub fn read_file(path: &Path) -> Result<FileRead, ReadError> {
-    let bytes = std::fs::read(path)?;
-    let head = &bytes[..bytes.len().min(512)];
+    let path = primary_path(path);
+    let bytes = std::fs::read(&path)?;
+    let head = &bytes[..bytes.len().min(1024)];
     let reader = readers()
         .into_iter()
-        .find(|r| r.probe(path, head))
-        .ok_or_else(|| ReadError::UnknownFormat(path.to_path_buf()))?;
+        .find(|r| r.probe(&path, head))
+        .ok_or_else(|| ReadError::UnknownFormat(path.clone()))?;
     Ok(FileRead {
-        path: path.to_path_buf(),
+        content_hash: content_hash(&bytes, &reader.companions(&path))?,
         format: reader.name(),
-        content_hash: content_hash(&bytes),
-        recordings: reader.read(path, &bytes)?,
+        recordings: reader.read(&path, &bytes)?,
+        path,
+        layout: None,
     })
 }
 
-/// Reloads a trace's samples, refusing a file that changed since import.
-pub fn load_samples(source: &TraceSource) -> Result<Vec<f32>, ReadError> {
-    let TraceSource::File { path, format, channel, content_hash: expected } = source;
+pub fn read_raw(path: &Path, layout: RawLayout) -> Result<FileRead, ReadError> {
+    let bytes = std::fs::read(path)?;
+    Ok(FileRead {
+        path: path.to_path_buf(),
+        format: raw::FORMAT,
+        content_hash: content_hash(&bytes, &[])?,
+        recordings: raw::read(path, &bytes, &layout)?,
+        layout: Some(layout),
+    })
+}
+
+/// Reopens a trace's file as a source, refusing one that changed since import.
+pub fn open_source(source: &TraceSource) -> Result<FileSource, ReadError> {
+    let TraceSource::File { path, format, content_hash: expected, layout, .. } = source;
     let path = Path::new(path);
     let bytes = std::fs::read(path)?;
-    if content_hash(&bytes) != *expected {
-        return Err(ReadError::Changed(path.to_path_buf()));
-    }
-    let reader = reader(format).ok_or_else(|| ReadError::UnknownFormat(path.to_path_buf()))?;
-    reader
-        .read(path, &bytes)?
+    let recordings = if format == raw::FORMAT {
+        let layout = layout.ok_or_else(|| ReadError::Format(format!("{}: raw layout missing", path.display())))?;
+        if content_hash(&bytes, &[])? != *expected {
+            return Err(ReadError::Changed(path.to_path_buf()));
+        }
+        raw::read(path, &bytes, &layout)?
+    } else {
+        let reader = reader(format).ok_or_else(|| ReadError::UnknownFormat(path.to_path_buf()))?;
+        if content_hash(&bytes, &reader.companions(path))? != *expected {
+            return Err(ReadError::Changed(path.to_path_buf()));
+        }
+        reader.read(path, &bytes)?
+    };
+    Ok(FileSource::new(recordings))
+}
+
+/// Reloads one trace's samples through its source.
+pub fn load_samples(source: &TraceSource) -> Result<TraceSamples, ReadError> {
+    let TraceSource::File { channel, .. } = source;
+    ingest(&mut open_source(source)?)?
         .into_iter()
-        .find(|r| r.channel == *channel)
-        .map(|r| r.samples)
+        .find(|(header, _)| header.channel == *channel)
+        .map(|(_, samples)| samples)
         .ok_or(ReadError::MissingChannel(*channel))
 }
 
@@ -148,7 +216,8 @@ mod tests {
         std::fs::write(&path, "x\n1\n2\n").unwrap();
         let read = read_file(&path).unwrap();
         let source = read.source(0);
-        assert_eq!(load_samples(&source).unwrap(), [1.0, 2.0]);
+        let TraceSamples::Real(samples) = load_samples(&source).unwrap() else { panic!() };
+        assert_eq!(samples.iter().collect::<Vec<_>>(), [1.0, 2.0]);
 
         std::fs::write(&path, "x\n1\n3\n").unwrap();
         assert!(matches!(load_samples(&source), Err(ReadError::Changed(_))));
@@ -160,5 +229,56 @@ mod tests {
         let path = dir.path().join("a.bin");
         std::fs::write(&path, [0u8, 1, 2]).unwrap();
         assert!(matches!(read_file(&path), Err(ReadError::UnknownFormat(_))));
+    }
+
+    #[test]
+    fn phase_one_traces_still_deserialize() {
+        let json = r#"{"id":"0192f0c4-0000-7000-8000-000000000001","sensor":"0192f0c4-0000-7000-8000-000000000002",
+            "start":{"secs":0,"frac":0.0},"sample_rate":100.0,"len":4,
+            "source":{"File":{"path":"a.wav","format":"wav","channel":0,"content_hash":"00"}}}"#;
+        let trace: squiggle_core::Trace = serde_json::from_str(json).unwrap();
+        assert_eq!(trace.kind, squiggle_core::SampleKind::Real);
+        assert!(matches!(trace.source, TraceSource::File { layout: None, .. }));
+    }
+
+    #[test]
+    fn raw_files_reload_with_their_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dump.bin");
+        std::fs::write(&path, [1u8, 0, 2, 0]).unwrap();
+        let read = read_raw(&path, RawLayout::default()).unwrap();
+        let TraceSamples::Real(samples) = load_samples(&read.source(0)).unwrap() else { panic!() };
+        assert_eq!(samples.iter().collect::<Vec<_>>(), [1.0, 2.0]);
+    }
+
+    #[test]
+    fn sigmf_resolves_and_hashes_its_data_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = dir.path().join("a.sigmf-meta");
+        let data = dir.path().join("a.sigmf-data");
+        std::fs::write(&meta, r#"{"global":{"core:datatype":"rf32_le","core:sample_rate":10}}"#).unwrap();
+        std::fs::write(&data, 1.0f32.to_le_bytes()).unwrap();
+        let read = read_file(&data).unwrap();
+        assert_eq!(read.path, meta);
+        let source = read.source(0);
+        assert!(load_samples(&source).is_ok());
+        std::fs::write(&data, 2.0f32.to_le_bytes()).unwrap();
+        assert!(matches!(load_samples(&source), Err(ReadError::Changed(_))));
+    }
+
+    #[test]
+    fn mseed_and_sac_load_through_read_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mseed = dir.path().join("a.mseed");
+        let values: Vec<i32> = (0..30).collect();
+        let data = mseed::tests::steim2_encode(&values, 0);
+        std::fs::write(&mseed, mseed::tests::record(["IU", "A", "", "BHZ"], (2026, 1, 0, 0, 0, 0), (40, 1), 11, 30, &data, true)).unwrap();
+        let sac = dir.path().join("b.sac");
+        std::fs::write(&sac, sac::tests::write_sac(&[1.0, 2.0], true, "B", "BDF")).unwrap();
+        for (path, format, len) in [(mseed, "mseed", 30), (sac, "sac", 2)] {
+            let read = read_file(&path).unwrap();
+            assert_eq!(read.format, format);
+            assert_eq!(load_samples(&read.source(0)).unwrap().len(), len);
+        }
     }
 }

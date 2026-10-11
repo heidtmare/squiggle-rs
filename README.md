@@ -9,6 +9,12 @@ them through Fourier and wavelet transforms without leaving the plot.
 - **Fast at scale.** Samples are uploaded to the GPU once and projected in a
   vertex shader, so panning and zooming cost nothing per point. A hundred
   squiggles of ten thousand samples each stay smooth.
+- **Stacked multi-sensor tracks.** Traces from different sensors share one
+  time axis, from 1 px/day to 10 ps/px, so a 40 Hz seismometer and a
+  1 GS/s capture line up. A min/max level-of-detail pyramid keeps tens of
+  millions of samples per trace interactive.
+- **Seismic, RF and digitizer formats.** miniSEED (Steim1/2), SAC, SigMF
+  (complex I/Q), WAV, CSV and raw binary with a described layout.
 - **Independent axis zoom.** Zoom x and y together or separately, anchored on
   the point under the cursor — waveform axes rarely share a unit.
 - **Even strokes at any zoom.** Lines are widened in screen space after
@@ -39,7 +45,7 @@ already compiles dependencies with optimizations in dev profiles.
 | Flag | Effect |
 | --- | --- |
 | `--project FILE` | Open a `.squiggle` project |
-| `WAVEFORM...` | Import these WAV/CSV files |
+| `WAVEFORM...` | Import these files (any format below) |
 | `--squiggles N` | Start with `N` demo squiggles |
 | `--samples N` | Samples per demo squiggle |
 | `--demo fourier\|wavelet` | Load a transform demo at startup |
@@ -47,7 +53,24 @@ already compiles dependencies with optimizations in dev profiles.
 
 ## Using it
 
-| Action | Control |
+The toolbar switches between two views. **Tracks** shows imported traces,
+one row each, on a shared time axis; it opens when traces are loaded.
+**Overlay** shows free squiggles: demos and transform results.
+
+| Tracks | Control |
+| --- | --- |
+| Zoom time about the cursor | Scroll |
+| Pan time / scroll rows | Drag, or horizontal scroll / scroll over the labels |
+| Scale amplitude (all rows) | Pinch, or `Control` + scroll |
+| Select a track | Click its row or label |
+| Y scale (normalized, auto, fixed), I/Q component | Right-click a row |
+| Frame every trace | **Fit**, or double-click |
+| Order rows | **Rows by** in the toolbar |
+
+The gold cursor spans every row; its time is shown on the axis, and its UTC
+time and the pixel size at the top right.
+
+| Overlay | Control |
 | --- | --- |
 | Pan | Drag with the left mouse button |
 | Zoom both axes | Scroll |
@@ -84,14 +107,32 @@ Once saved, every edit is written immediately.
 **Import.** Each channel is listed for confirmation: sensor code, start time
 (UTC, ISO 8601), sample rate, phenomenology. Values not found in the file are
 flagged. A sensor already in the project keeps its assignment; otherwise a
-suggestion (from a SEED channel code) is pre-selected and marked. Traces plot
-in seconds from the project reference (earliest start), coloured by
-phenomenology.
+suggestion (from a SEED channel code, or RF for SigMF) is pre-selected and
+marked. Traces plot in seconds from the project reference (earliest start),
+coloured by phenomenology.
 
 | Format | Start | Rate | Sensor code |
 | --- | --- | --- | --- |
+| miniSEED 2 | record headers (+ B1001 µs, time correction) | header | `NET.STA.LOC.CHA` |
+| SAC | `nz*` + `b` | `1/delta` | `NET.STA.LOC.CMP` |
+| SigMF | first capture's `core:datetime` | `core:sample_rate` | file stem, `.chN` per channel |
 | WAV | supplied (defaults to file mtime) | header | file stem, `.chN` per channel |
 | CSV | ISO `time` column, else supplied | `time`/`t`/`timestamp`/`seconds` column, else supplied | column header |
+| Raw binary | supplied | supplied | file stem, `.chN` per channel |
+
+- **miniSEED**: encodings int16, int32, float32, float64, Steim1, Steim2;
+  records are merged per channel, gaps become missing samples (drawn as
+  breaks), overlaps are dropped. miniSEED 3 is not supported yet.
+- **SAC**: evenly spaced time series, either byte order.
+- **SigMF**: real or complex, any `core:datatype`; select either file of the
+  pair. Integer types are scaled to ±1. Both files are hashed.
+- **Raw binary**: any file no reader recognises. The import dialog asks for
+  its layout (number format, byte order, real or I/Q, interleaved channels,
+  header bytes, scale); the layout is stored with each trace, and the last
+  one used is offered for the next file.
+
+Complex (I/Q) traces plot magnitude by default; right-click the row for
+phase, I or Q.
 
 **Phenomenology.** Built-ins: seismic, acoustic, infrasound, RF, EMP. Each
 has quantity, units, sample kind, propagation (constant speed, phases, or
@@ -142,10 +183,11 @@ cargo run -p squiggle-app --release -- --demo fourier --screenshot fourier.png
 ### Layout
 
 ```
-squiggle-core/   model, project op log, time, transforms; no dependencies (optional serde)
-squiggle-io/     WAV/CSV readers, SQLite project store
+squiggle-core/   model, project op log, time, samples, LOD, transforms; no dependencies (optional serde)
+squiggle-io/     readers (miniSEED, SAC, SigMF, WAV, CSV, raw), sources, SQLite project store
 squiggle-app/    the Bevy application
-  src/workspace.rs   open project, async file I/O, trace squiggles
+  src/workspace.rs   open project, async file I/O
+  src/tracks.rs      stacked tracks: LOD meshes, time axis, labels
   src/project_ui.rs  import, sensor and phenomenology windows
   assets/shaders/squiggle_line.wgsl   screen-space polyline expansion
   src/plot/      camera, input, meshing, overlay
@@ -169,6 +211,19 @@ only way to get an even stroke when x and y are scaled by different amounts.
 Pan and zoom are a single `Transform` on the parent of every squiggle, so
 moving the view touches one matrix rather than every point.
 
+Tracks are separate entities, not children of that parent. Each holds a
+min/max pyramid of its samples (blocks of 16·4ᵏ, built off-thread, extendable
+in place for streaming) and a mesh of about one min/max pair per pixel over
+three screen widths, alternating min-first and max-first so the line never
+doubles back. The mesh is rebuilt only when the view leaves that window or the
+zoom changes by more than ~2.8×; otherwise only the transform moves. Mesh x
+is seconds from the window start and the transform is computed in `f64`, so
+nanosecond spacing survives far from the reference.
+
+Readers emit through `WaveformSource` (`Header`, `Chunk`, `Gap`, `End`);
+loading consumes sources, so a live feed can replace a file without changing
+display or ingest.
+
 Axes, crosshairs and the dots on a selected squiggle are drawn with gizmos:
 there are never more than a few hundred of them and they change every frame,
 which is the opposite trade from the squiggles themselves.
@@ -189,5 +244,9 @@ cargo test          # the whole workspace
 anchoring, tick placement under pan and zoom, label formatting, bounds
 maintenance, hit-testing, and the transforms: FFT against DFT, exact
 forward-inverse round trips, amplitude scaling, STFT frame placement, and
-wavelet orthonormality and reconstruction. `squiggle-app` tests the mesh
-builder's topology and argument parsing.
+wavelet orthonormality and reconstruction, plus LOD ranges and decimation
+against brute force (one chunk or many) and time-axis ticks.
+`squiggle-io` tests each reader on synthesised files (Steim1/2 round trips,
+both SAC byte orders, SigMF pairs, raw layouts), record merging with gaps,
+source chunking, and change detection. `squiggle-app` tests the mesh
+builder's topology, import validation, LOD bucketing and argument parsing.

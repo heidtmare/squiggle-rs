@@ -54,7 +54,8 @@ pub const USAGE: &str = "\
 Usage: squiggle-app [--project FILE] [--squiggles N] [--samples N] [--demo SCENE]
                     [--screenshot FILE] [WAVEFORM...]
 
-  WAVEFORM...        import these files (WAV, CSV) at startup
+  WAVEFORM...        import these files at startup (miniSEED, SAC, SigMF,
+                     WAV, CSV; anything else as raw binary)
   --project FILE     open a .squiggle project
   --squiggles N      put N squiggles on the plot at startup (default 0)
   --samples N        samples per generated squiggle (default 1000)

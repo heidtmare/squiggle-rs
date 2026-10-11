@@ -6,7 +6,8 @@
 
 use bevy::math::{Isometry2d, Rot2};
 use bevy::prelude::*;
-use squiggle_core::{Axis, Coord, Orientation, PlotView, Rgba};
+use squiggle_core::timeline::nice_step;
+use squiggle_core::{Anchor, Axis, AxisKind, Coord, Orientation, PlotView, Rgba};
 
 use super::{Plot, SquiggleModel};
 
@@ -21,6 +22,10 @@ const POINT_RADIUS: f32 = 2.5;
 /// individually; the line already shows where they are. The Java renderer made
 /// the same trade by averaging points that landed on one screen column.
 const POINT_SPACING: f64 = 6.0;
+/// Target spacing between labelled ticks on linear axes. Labels carry three
+/// decimals, so steps stop shrinking at 0.001.
+const MAJOR_TICK_SPACING: f64 = 100.0;
+const MIN_MAJOR_STEP: f64 = 1e-3;
 
 pub fn draw(plot: Res<Plot>, squiggles: Query<&SquiggleModel>, mut gizmos: Gizmos) {
     if !plot.is_usable() {
@@ -29,7 +34,7 @@ pub fn draw(plot: Res<Plot>, squiggles: Query<&SquiggleModel>, mut gizmos: Gizmo
 
     if plot.axes_visible {
         for axis in &plot.axes {
-            draw_axis(&plot, axis, &mut gizmos);
+            draw_axis(&plot, &adaptive(axis, &plot.view), &mut gizmos);
         }
     }
 
@@ -38,6 +43,19 @@ pub fn draw(plot: Res<Plot>, squiggles: Query<&SquiggleModel>, mut gizmos: Gizmo
     if plot.crosshairs_visible {
         draw_crosshairs(&plot, &mut gizmos);
     }
+}
+
+/// Value-anchored linear axes pick a 1-2-5 step for the current zoom.
+fn adaptive(axis: &Axis, view: &PlotView) -> Axis {
+    if axis.kind != AxisKind::Linear || axis.anchor != Anchor::Value {
+        return axis.clone();
+    }
+    let scale = match axis.orientation {
+        Orientation::X => view.scale.x,
+        Orientation::Y => view.scale.y,
+    };
+    let (major, minor) = nice_step((MAJOR_TICK_SPACING / scale).max(MIN_MAJOR_STEP));
+    axis.clone().with_steps(major, minor)
 }
 
 fn draw_axis(plot: &Plot, axis: &Axis, gizmos: &mut Gizmos) {
@@ -204,4 +222,20 @@ fn masked_text(
 
 fn to_color(rgba: Rgba) -> Color {
     Color::srgba(rgba.red, rgba.green, rgba.blue, rgba.alpha)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linear_value_axes_adapt_to_zoom() {
+        let view = PlotView { scale: Coord::new(25.0, 0.5), ..PlotView::default() };
+        let x = adaptive(&Axis::linear("x", Orientation::X), &view);
+        assert_eq!((x.major_step, x.minor_step), (5.0, 1.0));
+        let y = adaptive(&Axis::linear("y", Orientation::Y), &view);
+        assert_eq!(y.major_step, 200.0);
+        let screen = Axis::linear("s", Orientation::X).with_anchor(Anchor::Screen);
+        assert_eq!(adaptive(&screen, &view).major_step, 100.0);
+    }
 }
