@@ -6,6 +6,7 @@
 
 mod demo;
 mod plot;
+mod events_ui;
 mod locate_ui;
 mod process_ui;
 mod project_ui;

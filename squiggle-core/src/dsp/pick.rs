@@ -90,6 +90,11 @@ impl StaLta {
             })
             .collect()
     }
+
+    /// Whether the long average has filled.
+    pub fn warm(&self) -> bool {
+        self.seen > self.warmup
+    }
 }
 
 /// A span where the ratio stayed above `off` after reaching `on`.
@@ -174,24 +179,28 @@ pub fn pick(values: &[f32], rate: f64, settings: &PickSettings) -> Result<Vec<On
     let mut previous_end = 0;
     let mut onsets = Vec::new();
     for trigger in triggers(&ratio, settings.on, settings.off) {
-        // The trigger lags the onset by up to an STA; look well before it.
-        let lo = trigger.on.saturating_sub(4 * sta + 8).max(previous_end);
-        let hi = (trigger.on + sta + 8).min(values.len());
+        onsets.extend(refine(values, rate, &trigger, sta, previous_end));
         previous_end = trigger.off;
-        let curve = aic(&values[lo..hi]);
-        let Some((k, &min)) = curve.iter().enumerate().min_by(|a, b| a.1.total_cmp(b.1)) else {
-            continue;
-        };
-        let within = |j: &usize| curve[*j] <= min + 2.0;
-        let left = (0..=k).rev().take_while(within).last().unwrap_or(k);
-        let right = (k..curve.len()).take_while(within).last().unwrap_or(k);
-        if !min.is_finite() {
-            continue;
-        }
-        let half_width = ((right - left) as f64 / 2.0).max(0.5);
-        onsets.push(Onset { index: lo + k, ratio: trigger.peak, uncertainty_s: half_width / rate });
     }
     Ok(onsets)
+}
+
+/// The onset behind `trigger`: the AIC minimum from four averaging windows
+/// before the trigger to one after, not before `floor`.
+pub fn refine(values: &[f32], rate: f64, trigger: &Trigger, window: usize, floor: usize) -> Option<Onset> {
+    // The trigger lags the onset by up to a window; look well before it.
+    let lo = trigger.on.saturating_sub(4 * window + 8).max(floor).min(values.len());
+    let hi = (trigger.on + window + 8).min(values.len());
+    let curve = aic(&values[lo..hi]);
+    let (k, &min) = curve.iter().enumerate().min_by(|a, b| a.1.total_cmp(b.1))?;
+    if !min.is_finite() {
+        return None;
+    }
+    let within = |j: &usize| curve[*j] <= min + 2.0;
+    let left = (0..=k).rev().take_while(within).last().unwrap_or(k);
+    let right = (k..curve.len()).take_while(within).last().unwrap_or(k);
+    let half_width = ((right - left) as f64 / 2.0).max(0.5);
+    Some(Onset { index: lo + k, ratio: trigger.peak, uncertainty_s: half_width / rate })
 }
 
 #[cfg(test)]

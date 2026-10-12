@@ -7,6 +7,9 @@
 //! - [`STATIONS`]: a shallow explosion recorded by EMP, seismic (P and S) and
 //!   infrasound sensors at known positions. Arrivals follow the built-in
 //!   propagation speeds exactly. Checks picking and location.
+//! - [`SWARM`]: two minutes on eight seismic stations with six events (one
+//!   too weak to detect) and single-station glitches. Checks detection and
+//!   association.
 
 use std::f64::consts::TAU;
 use std::path::PathBuf;
@@ -219,6 +222,125 @@ impl Station {
             })
             .collect()
     }
+}
+
+/// A swarm event: position relative to [`SOURCE`], origin time after
+/// [`ORIGIN`], and amplitude (1 is the located event's).
+pub struct SwarmEvent {
+    pub east_km: f64,
+    pub north_km: f64,
+    pub origin: f64,
+    pub amplitude: f64,
+}
+
+pub const SWARM: [SwarmEvent; 6] = [
+    SwarmEvent { east_km: 2.0, north_km: 3.0, origin: 12.0, amplitude: 1.0 },
+    SwarmEvent { east_km: -6.0, north_km: 8.0, origin: 32.0, amplitude: 0.7 },
+    SwarmEvent { east_km: 10.0, north_km: -4.0, origin: 52.0, amplitude: 1.2 },
+    // Below the noise: not expected to be found.
+    SwarmEvent { east_km: -3.0, north_km: -10.0, origin: 72.0, amplitude: 0.004 },
+    SwarmEvent { east_km: 4.0, north_km: 12.0, origin: 92.0, amplitude: 0.8 },
+    SwarmEvent { east_km: -9.0, north_km: -2.0, origin: 110.0, amplitude: 1.0 },
+];
+
+/// Events in [`SWARM`] strong enough to detect.
+#[cfg(test)]
+pub const SWARM_DETECTABLE: usize = 5;
+
+/// Single-station glitches: station index and time after [`ORIGIN`].
+const GLITCHES: [(usize, f64); 4] = [(2, 20.0), (5, 65.0), (7, 100.0), (0, 121.0)];
+
+const SWARM_DURATION: f64 = 130.0;
+const SWARM_RATE: f64 = 100.0;
+const SWARM_STATIONS: [(&str, f64, f64); 8] = [
+    ("SW01", 12.0, 5.0),
+    ("SW02", -8.0, 14.0),
+    ("SW03", -15.0, -6.0),
+    ("SW04", 5.0, -18.0),
+    ("SW05", 22.0, -9.0),
+    ("SW06", -3.0, 25.0),
+    ("SW07", 15.0, 15.0),
+    ("SW08", -18.0, 8.0),
+];
+
+impl SwarmEvent {
+    pub fn source(&self) -> Source {
+        let l = offset_location(self.east_km, self.north_km);
+        Source { latitude: l.latitude, longitude: l.longitude, depth_m: 3_000.0 }
+    }
+}
+
+fn offset_location(east_km: f64, north_km: f64) -> Location {
+    let r = squiggle_core::locate::EARTH_RADIUS_M;
+    let latitude = SOURCE.latitude + (north_km * 1e3 / r).to_degrees();
+    let longitude = SOURCE.longitude + (east_km * 1e3 / (r * SOURCE.latitude.to_radians().cos())).to_degrees();
+    Location { latitude, longitude, elevation_m: 0.0 }
+}
+
+/// Samples of swarm station `index`, starting at [`ORIGIN`].
+fn swarm_samples(index: usize) -> Vec<f32> {
+    let (_, east, north) = SWARM_STATIONS[index];
+    let stored = offset_location(east, north);
+    let location = Location { latitude: f64::from(stored.latitude as f32), longitude: f64::from(stored.longitude as f32), ..stored };
+    let mut state = (index as u32 + 41).wrapping_mul(0x9E37_79B9) | 1;
+    let mut noise = || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        f64::from(state % 2001) / 1000.0 - 1.0
+    };
+    let arrivals: Vec<(f64, f64, f64)> = SWARM
+        .iter()
+        .flat_map(|e| {
+            let source = e.source();
+            let distance_km = squiggle_core::locate::slant_distance(source, &location) / 1e3;
+            let scale = e.amplitude / distance_km.sqrt();
+            [
+                (e.origin + travel_time(source, &location, 6000.0), 3.0 * scale, 0.0),
+                (e.origin + travel_time(source, &location, 3500.0), 6.0 * scale, 1.0),
+            ]
+        })
+        .collect();
+    let len = (SWARM_DURATION * SWARM_RATE) as usize;
+    (0..len)
+        .map(|i| {
+            let t = i as f64 / SWARM_RATE;
+            let mut value = 0.01 * noise();
+            for &(at, amplitude, s_wave) in &arrivals {
+                let t = t - at;
+                if (0.0..6.0).contains(&t) {
+                    value += if s_wave == 0.0 {
+                        amplitude * (1.0 - (-t / 0.01).exp()) * (-t / 0.4).exp() * ((TAU * 6.0 * t + 1.0).sin() + 0.6 * (TAU * 9.5 * t + 2.0).sin())
+                    } else {
+                        amplitude * (1.0 - (-t / 0.02).exp()) * (-t / 0.8).exp() * ((TAU * 3.0 * t + 0.5).sin() + 0.5 * (TAU * 4.5 * t).sin())
+                    };
+                }
+            }
+            for &(station, at) in &GLITCHES {
+                let t = t - at;
+                if station == index && (0.0..0.1).contains(&t) {
+                    value += (TAU * 20.0 * t).sin();
+                }
+            }
+            value as f32
+        })
+        .collect()
+}
+
+/// Writes the swarm as SAC with coordinates; paths in station order.
+pub fn write_swarm(dir: &std::path::Path) -> Result<Vec<PathBuf>, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let origin: Timestamp = ORIGIN.parse().expect("valid constant");
+    SWARM_STATIONS
+        .iter()
+        .enumerate()
+        .map(|(index, &(station, east, north))| {
+            let path = dir.join(format!("SY.{station}..HHZ.sac"));
+            let bytes = squiggle_io::sac::encode(&swarm_samples(index), origin, SWARM_RATE, ["SY", station, "", "HHZ"], Some(offset_location(east, north)));
+            write_atomic(&path, &bytes)?;
+            Ok(path)
+        })
+        .collect()
 }
 
 /// Writes every located-event trace as SAC with its coordinates; paths in [`STATIONS`] order.

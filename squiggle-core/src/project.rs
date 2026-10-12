@@ -6,6 +6,7 @@
 use core::fmt;
 
 use crate::dsp::Processing;
+use crate::event::{Event, EventStatus};
 use crate::id::Id;
 use crate::locate::Origin;
 use crate::phenomenology::{self, Phenomenology, PhenomenologyId};
@@ -41,20 +42,23 @@ pub enum Change {
     SetClockCorrection { sensor: Id, clock: ClockCorrection },
     SetSensorLocation { sensor: Id, location: Option<Location> },
     AddTrace(Trace),
-    /// Also removes the trace's picks.
+    /// Also removes the trace's picks and event memberships.
     RemoveTrace { trace: Id },
     /// Requires an assigned phenomenology and a filter valid at the trace's rate.
     SetProcessing { trace: Id, processing: Processing },
-    /// An automatic alignment is refused on a locked trace unless `revert`
+    /// The trace's alignment in `event` (it must be a member), or its global
+    /// one. An automatic alignment is refused on a locked one unless `revert`
     /// (an undo restoring an earlier value).
     SetAlignment {
         trace: Id,
         alignment: Option<Alignment>,
         #[cfg_attr(feature = "serde", serde(default))]
         revert: bool,
+        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+        event: Option<Id>,
     },
-    /// Adds a pick, replacing any with its id or its trace and phase. An
-    /// automatic pick needs an assigned phenomenology and never replaces a
+    /// Adds a pick, replacing any with its id or its trace, phase and event.
+    /// An automatic pick needs an assigned phenomenology and never replaces a
     /// manual one unless `revert`.
     SetPick {
         pick: Pick,
@@ -62,8 +66,18 @@ pub enum Change {
         revert: bool,
     },
     RemovePick { pick: Id },
-    /// The project's located source; per event once events exist.
-    SetOrigin { origin: Option<Origin> },
+    /// The located source of `event`, or the project's outside any event.
+    SetOrigin {
+        origin: Option<Origin>,
+        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+        event: Option<Id>,
+    },
+    /// Needs a window that ends after it starts, and known member traces.
+    AddEvent(Event),
+    /// Replaces the event with this id.
+    SetEvent(Event),
+    /// Also removes the event's picks.
+    RemoveEvent { event: Id },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -86,6 +100,9 @@ pub enum ApplyError {
     InvalidPick(String),
     /// An automatic pick would replace this manual one.
     LockedPick(Id),
+    UnknownEvent(Id),
+    NotMember { event: Id, trace: Id },
+    InvalidEvent(String),
 }
 
 impl fmt::Display for ApplyError {
@@ -109,6 +126,9 @@ impl fmt::Display for ApplyError {
             Self::UnknownPick(id) => write!(f, "no pick {id}"),
             Self::InvalidPick(why) => write!(f, "invalid pick: {why}"),
             Self::LockedPick(id) => write!(f, "pick {id} is manual and locked"),
+            Self::UnknownEvent(id) => write!(f, "no event {id}"),
+            Self::NotMember { event, trace } => write!(f, "trace {trace} is not a member of event {event}"),
+            Self::InvalidEvent(why) => write!(f, "invalid event: {why}"),
         }
     }
 }
@@ -124,7 +144,9 @@ pub struct Project {
     sensors: Vec<Sensor>,
     traces: Vec<Trace>,
     picks: Vec<Pick>,
+    /// Located source outside any event.
     pub origin: Option<Origin>,
+    events: Vec<Event>,
 }
 
 impl Project {
@@ -239,6 +261,9 @@ impl Project {
                     .ok_or(ApplyError::UnknownTrace(*trace))?;
                 self.traces.remove(index);
                 self.picks.retain(|p| p.trace != *trace);
+                for event in &mut self.events {
+                    event.members.retain(|m| m.trace != *trace);
+                }
             }
             Change::SetProcessing { trace, processing } => {
                 let current = self.trace(*trace).ok_or(ApplyError::UnknownTrace(*trace))?;
@@ -252,23 +277,40 @@ impl Project {
                 }
                 self.trace_mut(*trace)?.processing = *processing;
             }
-            Change::SetAlignment { trace, alignment, revert } => {
+            Change::SetAlignment { trace, alignment, revert, event } => {
                 let current = self.trace(*trace).ok_or(ApplyError::UnknownTrace(*trace))?;
+                if let Some(event) = event {
+                    let e = self.event(*event).ok_or(ApplyError::UnknownEvent(*event))?;
+                    if e.member(*trace).is_none() {
+                        return Err(ApplyError::NotMember { event: *event, trace: *trace });
+                    }
+                }
                 let automatic = alignment.as_ref().is_some_and(|a| !a.provenance.is_manual());
                 if automatic && !revert {
-                    if current.is_locked() {
+                    if self.is_locked(*event, *trace) {
                         return Err(ApplyError::Locked(*trace));
                     }
                     if self.trace_phenomenology(current).is_none() {
                         return Err(ApplyError::Unassigned(*trace));
                     }
                 }
-                self.trace_mut(*trace)?.alignment = alignment.clone();
+                match event {
+                    Some(event) => {
+                        let member = self.event_mut(*event)?.member_mut(*trace).expect("checked above");
+                        member.alignment = alignment.clone();
+                    }
+                    None => self.trace_mut(*trace)?.alignment = alignment.clone(),
+                }
             }
             Change::SetPick { pick, revert } => {
                 let trace = self.trace(pick.trace).ok_or(ApplyError::UnknownTrace(pick.trace))?;
                 if !(pick.uncertainty_s.is_finite() && pick.uncertainty_s > 0.0) {
                     return Err(ApplyError::InvalidPick("uncertainty must be positive".to_string()));
+                }
+                if let Some(event) = pick.event
+                    && self.event(event).is_none()
+                {
+                    return Err(ApplyError::UnknownEvent(event));
                 }
                 if !pick.provenance.is_manual() && !revert {
                     if self.trace_phenomenology(trace).is_none() {
@@ -278,58 +320,115 @@ impl Project {
                         return Err(ApplyError::LockedPick(manual.id));
                     }
                 }
-                self.picks.retain(|p| !(p.id == pick.id || (p.trace == pick.trace && p.phase == pick.phase)));
+                self.picks.retain(|p| !Self::replaces(pick, p));
                 self.picks.push(pick.clone());
             }
             Change::RemovePick { pick } => {
                 let index = self.picks.iter().position(|p| p.id == *pick).ok_or(ApplyError::UnknownPick(*pick))?;
                 self.picks.remove(index);
             }
-            Change::SetOrigin { origin } => self.origin = origin.clone(),
+            Change::SetOrigin { origin, event } => match event {
+                Some(event) => self.event_mut(*event)?.origin = origin.clone(),
+                None => self.origin = origin.clone(),
+            },
+            Change::AddEvent(event) => {
+                if self.event(event.id).is_some() {
+                    return Err(ApplyError::DuplicateId(event.id));
+                }
+                self.validate_event(event)?;
+                self.events.push(event.clone());
+            }
+            Change::SetEvent(event) => {
+                self.validate_event(event)?;
+                *self.event_mut(event.id)? = event.clone();
+            }
+            Change::RemoveEvent { event } => {
+                let index = self.events.iter().position(|e| e.id == *event).ok_or(ApplyError::UnknownEvent(*event))?;
+                self.events.remove(index);
+                self.picks.retain(|p| p.event != Some(*event));
+            }
         }
         Ok(())
     }
 
-    /// The change that undoes `change`, from the current state. `None` for
-    /// changes that cannot be undone yet.
-    pub fn inverse(&self, change: &Change) -> Option<Change> {
+    fn validate_event(&self, event: &Event) -> Result<(), ApplyError> {
+        if event.end.seconds_since(event.start) <= 0.0 {
+            return Err(ApplyError::InvalidEvent("the window must end after it starts".to_string()));
+        }
+        for (i, member) in event.members.iter().enumerate() {
+            if self.trace(member.trace).is_none() {
+                return Err(ApplyError::UnknownTrace(member.trace));
+            }
+            if event.members[..i].iter().any(|m| m.trace == member.trace) {
+                return Err(ApplyError::InvalidEvent("a trace is listed twice".to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether setting `new` removes `old`: same id, or same trace, phase and event.
+    fn replaces(new: &Pick, old: &Pick) -> bool {
+        old.id == new.id || (old.trace == new.trace && old.phase == new.phase && old.event == new.event)
+    }
+
+    /// The changes that undo `change`, from the current state, applied in
+    /// order. `None` for changes that cannot be undone yet.
+    pub fn inverse(&self, change: &Change) -> Option<Vec<Change>> {
+        let one = |c: Option<Change>| c.map(|c| vec![c]);
         match change {
-            Change::RenameProject { .. } => Some(Change::RenameProject { name: self.name.clone() }),
-            Change::SetReference { .. } => self.reference.map(|reference| Change::SetReference { reference }),
+            Change::RenameProject { .. } => one(Some(Change::RenameProject { name: self.name.clone() })),
+            Change::SetReference { .. } => one(self.reference.map(|reference| Change::SetReference { reference })),
             Change::SetClockCorrection { sensor, .. } => {
-                self.sensor(*sensor).map(|s| Change::SetClockCorrection { sensor: *sensor, clock: s.clock })
+                one(self.sensor(*sensor).map(|s| Change::SetClockCorrection { sensor: *sensor, clock: s.clock }))
             }
             Change::SetProcessing { trace, .. } => {
-                self.trace(*trace).map(|t| Change::SetProcessing { trace: *trace, processing: t.processing })
+                one(self.trace(*trace).map(|t| Change::SetProcessing { trace: *trace, processing: t.processing }))
             }
-            Change::SetAlignment { trace, .. } => self.trace(*trace).map(|t| Change::SetAlignment {
-                trace: *trace,
-                alignment: t.alignment.clone(),
-                revert: true,
-            }),
+            Change::SetAlignment { trace, event, .. } => {
+                self.trace(*trace)?;
+                one(Some(Change::SetAlignment {
+                    trace: *trace,
+                    alignment: self.alignment(*event, *trace).cloned(),
+                    revert: true,
+                    event: *event,
+                }))
+            }
             Change::SetSensorLocation { sensor, .. } => {
-                self.sensor(*sensor).map(|s| Change::SetSensorLocation { sensor: *sensor, location: s.location })
+                one(self.sensor(*sensor).map(|s| Change::SetSensorLocation { sensor: *sensor, location: s.location }))
             }
             Change::SetPick { pick, .. } => {
                 let replaced: Vec<&Pick> = self.replaced_picks(pick).collect();
                 match replaced.as_slice() {
-                    [] => Some(Change::RemovePick { pick: pick.id }),
-                    // Matches the new pick by id or phase, so it replaces it back.
-                    [old] => Some(Change::SetPick { pick: (*old).clone(), revert: true }),
+                    [] => one(Some(Change::RemovePick { pick: pick.id })),
+                    // Matches the new pick by id or slot, so it replaces it back.
+                    [old] => one(Some(Change::SetPick { pick: (*old).clone(), revert: true })),
                     _ => None,
                 }
             }
-            Change::RemovePick { pick } => {
-                self.pick(*pick).map(|p| Change::SetPick { pick: p.clone(), revert: true })
+            Change::RemovePick { pick } => one(self.pick(*pick).map(|p| Change::SetPick { pick: p.clone(), revert: true })),
+            Change::SetOrigin { event, .. } => {
+                let origin = match event {
+                    Some(event) => self.event(*event)?.origin.clone(),
+                    None => self.origin.clone(),
+                };
+                one(Some(Change::SetOrigin { origin, event: *event }))
             }
-            Change::SetOrigin { .. } => Some(Change::SetOrigin { origin: self.origin.clone() }),
+            Change::AddEvent(event) => one(Some(Change::RemoveEvent { event: event.id })),
+            Change::SetEvent(event) => one(self.event(event.id).map(|e| Change::SetEvent(e.clone()))),
+            Change::RemoveEvent { event } => {
+                let mut changes = vec![Change::AddEvent(self.event(*event)?.clone())];
+                changes.extend(
+                    self.picks.iter().filter(|p| p.event == Some(*event)).map(|p| Change::SetPick { pick: p.clone(), revert: true }),
+                );
+                Some(changes)
+            }
             _ => None,
         }
     }
 
     /// Picks a [`Change::SetPick`] of `pick` would replace.
     fn replaced_picks<'a>(&'a self, pick: &'a Pick) -> impl Iterator<Item = &'a Pick> + 'a {
-        self.picks.iter().filter(|p| p.id == pick.id || (p.trace == pick.trace && p.phase == pick.phase))
+        self.picks.iter().filter(|p| Self::replaces(pick, p))
     }
 
     pub fn picks(&self) -> &[Pick] {
@@ -340,8 +439,55 @@ impl Project {
         self.picks.iter().find(|p| p.id == id)
     }
 
+    /// Every pick on `trace`, in any event.
     pub fn trace_picks(&self, trace: Id) -> impl Iterator<Item = &Pick> {
         self.picks.iter().filter(move |p| p.trace == trace)
+    }
+
+    /// Picks on `trace` in `event` (`None`: outside any event).
+    pub fn event_picks(&self, event: Option<Id>, trace: Id) -> impl Iterator<Item = &Pick> {
+        self.picks.iter().filter(move |p| p.trace == trace && p.event == event)
+    }
+
+    pub fn events(&self) -> &[Event] {
+        &self.events
+    }
+
+    pub fn event(&self, id: Id) -> Option<&Event> {
+        self.events.iter().find(|e| e.id == id)
+    }
+
+    fn event_mut(&mut self, id: Id) -> Result<&mut Event, ApplyError> {
+        self.events.iter_mut().find(|e| e.id == id).ok_or(ApplyError::UnknownEvent(id))
+    }
+
+    /// A trace's alignment in `event`, or its global one.
+    pub fn alignment(&self, event: Option<Id>, trace: Id) -> Option<&Alignment> {
+        match event {
+            Some(event) => self.event(event)?.member(trace)?.alignment.as_ref(),
+            None => self.trace(trace)?.alignment.as_ref(),
+        }
+    }
+
+    pub fn offset(&self, event: Option<Id>, trace: Id) -> f64 {
+        self.alignment(event, trace).map_or(0.0, |a| a.offset_s)
+    }
+
+    pub fn is_locked(&self, event: Option<Id>, trace: Id) -> bool {
+        self.alignment(event, trace).is_some_and(|a| a.locked)
+    }
+
+    /// The located source of `event`, or the project's.
+    pub fn origin_of(&self, event: Option<Id>) -> Option<&Origin> {
+        match event {
+            Some(event) => self.event(event)?.origin.as_ref(),
+            None => self.origin.as_ref(),
+        }
+    }
+
+    /// Statuses that automatic detection may replace.
+    pub fn replaceable(event: &Event) -> bool {
+        event.status == EventStatus::Auto && !event.provenance.is_manual()
     }
 
     /// A recorded time on `trace`'s clock, corrected.
@@ -406,9 +552,10 @@ impl Project {
         self.correct(trace, trace.start)
     }
 
-    /// Clock-corrected start plus the alignment offset: where the trace is drawn and analysed.
-    pub fn aligned_start(&self, trace: &Trace) -> Timestamp {
-        self.corrected_start(trace).add_seconds(trace.offset())
+    /// Clock-corrected start plus the alignment offset in `event`: where the
+    /// trace is drawn and analysed.
+    pub fn aligned_start(&self, event: Option<Id>, trace: &Trace) -> Timestamp {
+        self.corrected_start(trace).add_seconds(self.offset(event, trace.id))
     }
 }
 
@@ -538,12 +685,12 @@ mod tests {
         let t = assigned(&mut project);
         let auto = Provenance::Auto { stage: "align".into(), config_hash: "x".into() };
         let manual = Provenance::Manual { analyst: analyst(), at: Timestamp::now() };
-        let set = |alignment, revert| Change::SetAlignment { trace: t.id, alignment, revert };
+        let set = |alignment, revert| Change::SetAlignment { trace: t.id, alignment, revert, event: None };
 
         project.commit(&analyst(), set(alignment(0.5, auto.clone(), false), false)).unwrap();
-        let undo = project.inverse(&set(alignment(1.0, manual.clone(), true), false)).unwrap();
+        let undo = project.inverse(&set(alignment(1.0, manual.clone(), true), false)).unwrap().remove(0);
         project.commit(&analyst(), set(alignment(1.0, manual, true), false)).unwrap();
-        assert_eq!(project.aligned_start(project.trace(t.id).unwrap()), Timestamp::new(1_001, 0.0));
+        assert_eq!(project.aligned_start(None, project.trace(t.id).unwrap()), Timestamp::new(1_001, 0.0));
         assert_eq!(
             project.commit(&analyst(), set(alignment(2.0, auto, false), false)),
             Err(ApplyError::Locked(t.id))
@@ -576,7 +723,7 @@ mod tests {
             Err(ApplyError::InvalidProcessing(_))
         ));
         let change = Change::SetProcessing { trace: t.id, processing: filter(10.0) };
-        let undo = project.inverse(&change).unwrap();
+        let undo = project.inverse(&change).unwrap().remove(0);
         project.commit(&analyst(), change).unwrap();
         assert!(project.trace(t.id).unwrap().processing.filter.is_some());
         project.commit(&analyst(), undo).unwrap();
@@ -591,6 +738,7 @@ mod tests {
             phase: phase.to_string(),
             uncertainty_s: 0.01,
             provenance,
+            event: None,
         }
     }
 
@@ -605,7 +753,7 @@ mod tests {
         project.commit(&analyst(), set(pick(t.id, "P", 0.1, auto.clone()))).unwrap();
         project.commit(&analyst(), set(pick(t.id, "S", 0.3, auto.clone()))).unwrap();
         let replacement = set(pick(t.id, "P", 0.2, manual));
-        let undo = project.inverse(&replacement).unwrap();
+        let undo = project.inverse(&replacement).unwrap().remove(0);
         project.commit(&analyst(), replacement).unwrap();
         assert_eq!(project.trace_picks(t.id).count(), 2);
         let manual_id = project.trace_picks(t.id).find(|p| p.phase == "P").unwrap().id;
@@ -645,11 +793,92 @@ mod tests {
         );
         let good = Location { latitude: 35.0, longitude: -106.0, elevation_m: 1500.0 };
         let change = Change::SetSensorLocation { sensor: t.sensor, location: Some(good) };
-        let undo = project.inverse(&change).unwrap();
+        let undo = project.inverse(&change).unwrap().remove(0);
         project.commit(&analyst(), change).unwrap();
         assert_eq!(project.sensor(t.sensor).unwrap().location, Some(good));
         project.commit(&analyst(), undo).unwrap();
         assert_eq!(project.sensor(t.sensor).unwrap().location, None);
+    }
+
+    fn event(members: &[Id]) -> Event {
+        Event {
+            id: Id::generate(),
+            start: Timestamp::new(1_000, 0.0),
+            end: Timestamp::new(1_005, 0.0),
+            members: members.iter().map(|&t| crate::event::Member::new(t)).collect(),
+            origin: None,
+            status: EventStatus::Auto,
+            provenance: Provenance::Auto { stage: "detect".into(), config_hash: "x".into() },
+        }
+    }
+
+    #[test]
+    fn event_alignment_is_separate_from_the_global_one() {
+        let (mut project, _) = Project::create("p", &analyst());
+        let t = assigned(&mut project);
+        let e = event(&[t.id]);
+        project.commit(&analyst(), Change::AddEvent(e.clone())).unwrap();
+        let manual = Provenance::Manual { analyst: analyst(), at: Timestamp::now() };
+        let set = |event| Change::SetAlignment { trace: t.id, alignment: alignment(0.5, manual.clone(), true), revert: false, event };
+        project.commit(&analyst(), set(Some(e.id))).unwrap();
+        assert_eq!((project.offset(Some(e.id), t.id), project.offset(None, t.id)), (0.5, 0.0));
+        assert!(project.is_locked(Some(e.id), t.id) && !project.is_locked(None, t.id));
+
+        // Not a member of a second event.
+        let other = event(&[]);
+        project.commit(&analyst(), Change::AddEvent(other.clone())).unwrap();
+        assert_eq!(project.commit(&analyst(), set(Some(other.id))), Err(ApplyError::NotMember { event: other.id, trace: t.id }));
+    }
+
+    #[test]
+    fn picks_are_unique_per_event() {
+        let (mut project, _) = Project::create("p", &analyst());
+        let t = assigned(&mut project);
+        let (a, b) = (event(&[t.id]), event(&[t.id]));
+        project.commit(&analyst(), Change::AddEvent(a.clone())).unwrap();
+        project.commit(&analyst(), Change::AddEvent(b.clone())).unwrap();
+        let auto = Provenance::Auto { stage: "pick".into(), config_hash: "x".into() };
+        for e in [a.id, b.id] {
+            let p = Pick { event: Some(e), ..pick(t.id, "P", 0.1, auto.clone()) };
+            project.commit(&analyst(), Change::SetPick { pick: p, revert: false }).unwrap();
+        }
+        assert_eq!(project.trace_picks(t.id).count(), 2);
+        assert_eq!(project.event_picks(Some(a.id), t.id).count(), 1);
+
+        // Removing an event removes its picks; undo restores both.
+        let remove = Change::RemoveEvent { event: a.id };
+        let undo = project.inverse(&remove).unwrap();
+        project.commit(&analyst(), remove).unwrap();
+        assert_eq!((project.events().len(), project.trace_picks(t.id).count()), (1, 1));
+        for change in undo {
+            project.commit(&analyst(), change).unwrap();
+        }
+        assert_eq!((project.events().len(), project.event_picks(Some(a.id), t.id).count()), (2, 1));
+    }
+
+    #[test]
+    fn events_validate_and_lose_removed_traces() {
+        let (mut project, _) = Project::create("p", &analyst());
+        let t = assigned(&mut project);
+        let backwards = Event { end: Timestamp::new(999, 0.0), ..event(&[t.id]) };
+        assert!(matches!(project.commit(&analyst(), Change::AddEvent(backwards)), Err(ApplyError::InvalidEvent(_))));
+        let ghost = Id::generate();
+        assert_eq!(project.commit(&analyst(), Change::AddEvent(event(&[ghost]))), Err(ApplyError::UnknownTrace(ghost)));
+        let e = event(&[t.id]);
+        project.commit(&analyst(), Change::AddEvent(e.clone())).unwrap();
+        let origin = Origin {
+            latitude: 1.0,
+            longitude: 2.0,
+            depth_m: 0.0,
+            time: Timestamp::new(1_000, 0.5),
+            rms_s: 0.0,
+            provenance: Provenance::Auto { stage: "locate".into(), config_hash: "x".into() },
+        };
+        project.commit(&analyst(), Change::SetOrigin { origin: Some(origin.clone()), event: Some(e.id) }).unwrap();
+        assert_eq!(project.origin_of(Some(e.id)), Some(&origin));
+        assert_eq!(project.origin_of(None), None);
+        project.commit(&analyst(), Change::RemoveTrace { trace: t.id }).unwrap();
+        assert!(project.event(e.id).unwrap().members.is_empty());
     }
 
     #[test]

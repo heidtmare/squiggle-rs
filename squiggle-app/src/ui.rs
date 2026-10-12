@@ -19,6 +19,7 @@ use squiggle_core::{
 
 use crate::demo::{self, DemoOptions};
 use crate::plot::{AddSquiggle, FitToData, Plot, PlotCamera, PlotMode, RemoveSquiggle, SquiggleModel};
+use crate::events_ui::{self, EventWindows};
 use crate::locate_ui::{self, LocateWindows};
 use crate::process_ui::{self, ProcessWindows};
 use crate::project_ui::{self, ProjectAccess, ProjectWindows};
@@ -43,10 +44,12 @@ impl Plugin for UiPlugin {
             .init_resource::<ProjectWindows>()
             .init_resource::<ProcessWindows>()
             .init_resource::<LocateWindows>()
+            .init_resource::<EventWindows>()
             .add_systems(Startup, setup)
             .add_systems(
                 EguiPrimaryContextPass,
-                (chrome, tracks::tracks_ui, project_ui::windows, process_ui::windows, locate_ui::windows).chain(),
+                (chrome, tracks::tracks_ui, project_ui::windows, process_ui::windows, locate_ui::windows, events_ui::windows)
+                    .chain(),
             );
     }
 }
@@ -70,6 +73,7 @@ pub struct TrackAccess<'w, 's> {
     tracks: Query<'w, 's, &'static mut Track>,
     process: ResMut<'w, ProcessWindows>,
     locate: ResMut<'w, LocateWindows>,
+    events: ResMut<'w, EventWindows>,
 }
 
 /// Which parts of the chrome are open.
@@ -304,6 +308,12 @@ fn menu_bar(
                 *tracks.mode = PlotMode::Tracks;
             }
         });
+        ui.menu_button("Events", |ui| {
+            events_ui::events_menu(ui, &mut tracks.events, &mut tracks.view);
+            if tracks.events.detect_open || tracks.events.catalogue_open {
+                *tracks.mode = PlotMode::Tracks;
+            }
+        });
         ui.menu_button("Transform", |ui| {
             let sources = TransformSources { squiggles, tracks, width: plot.view.plot_width() };
             transform_menu(ui, chrome, sources, commands, &project.workspace.project);
@@ -323,6 +333,14 @@ fn menu_bar(
                 .clicked()
             {
                 project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Located));
+                ui.close();
+            }
+            if ui
+                .button("Synthetic swarm")
+                .on_hover_text("A new project: two minutes on eight seismic stations with six events and glitches")
+                .clicked()
+            {
+                project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Swarm));
                 ui.close();
             }
             ui.separator();
@@ -748,7 +766,8 @@ fn about_window(ctx: &egui::Context, chrome: &mut Chrome) {
             ui.separator();
             ui.label("Process ▸ Filter and detrend preprocesses selected tracks; Process ▸ Align measures and applies delays.");
             ui.label("Process ▸ Pick finds onsets; Process ▸ Locate fits source position and origin time, and removes moveout.");
-            ui.label("Edits to processing, offsets, picks, sensor locations and the origin undo with ⌘Z / Ctrl+Z and redo with ⇧⌘Z.");
+            ui.label("Events ▸ Detect finds and associates events; Events ▸ Catalogue reviews them. ⌘/Ctrl+drag makes an event; drag its edges to resize; right-click to split. While reviewing: ] / [ next and previous, A accept, R reject, Esc close.");
+            ui.label("Edits to processing, offsets, picks, sensor locations, origins and events undo with ⌘Z / Ctrl+Z and redo with ⇧⌘Z.");
             ui.label("Transform turns the selected squiggles, or the visible part of selected tracks, into spectra or wavelet levels.");
         });
 }

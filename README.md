@@ -26,6 +26,11 @@ them through Fourier and wavelet transforms without leaving the plot.
   mixes phenomenologies (EMP anchors the origin, slower phases resolve
   position). Moveout removal and pick alignment line up arrivals across
   phenomenologies.
+- **Events.** Streaming detectors (STA/LTA, energy, kurtosis) on every track,
+  association across sensors with coincidence windows from each
+  phenomenology's propagation, located and outlier-pruned; a catalogue to
+  review, accept, reject, split and merge; events brushed by hand. Each event
+  carries its own members, offsets, picks and origin.
 - **Spectrogram strips** per row, two-sided for I/Q.
 - **Independent axis zoom.** Zoom x and y together or separately, anchored on
   the point under the cursor — waveform axes rarely share a unit.
@@ -59,6 +64,7 @@ already compiles dependencies with optimizations in dev profiles.
 | `--project FILE` | Open a `.squiggle` project |
 | `--synthetic` | Start with a synthetic event of known delays (see [Alignment](#alignment)) |
 | `--located` | Start with a synthetic EMP, seismic and infrasound event of known source (see [Picking and location](#picking-and-location)) |
+| `--swarm` | Start with two minutes of synthetic seismic data holding six events and glitches (see [Events](#events)) |
 | `WAVEFORM...` | Import these files (any format below) |
 | `--squiggles N` | Start with `N` demo squiggles |
 | `--samples N` | Samples per demo squiggle |
@@ -82,6 +88,10 @@ one row each, on a shared time axis; it opens when traces are loaded.
 | Shift a track in time | `Shift` + drag its row (`Alt` disables snapping) |
 | Pick first phase / S at the cursor | `P` / `S` over a row |
 | Remove the nearest pick | `Delete` or `Backspace` over a row; or right-click the row |
+| Make an event | `⌘` / `Ctrl` + drag across the tracks (members: selected rows, else every row in the span) |
+| Resize the reviewed event | Drag its window edge |
+| Split it, add or remove a member | Right-click a row |
+| Next / previous event, accept, reject, close | `]` / `[`, `A`, `R`, `Esc` while reviewing |
 | Nudge selected tracks | `←` / `→` one sample, with `Shift` ten |
 | Frame every trace | **Fit**, or double-click |
 | Order rows | **Rows by** in the toolbar |
@@ -129,8 +139,8 @@ change.
 
 Once saved, every edit is written immediately. Undo and redo append the
 inverse or repeated change to the log; the log is never rewritten.
-Processing, offsets, picks, sensor locations and the origin undo; imports and
-phenomenology assignments do not yet.
+Processing, offsets, picks, sensor locations, origins and events undo; imports
+and phenomenology assignments do not yet.
 
 **Import.** Each channel is listed for confirmation: sensor code, start time
 (UTC, ISO 8601), sample rate, phenomenology. Values not found in the file are
@@ -276,6 +286,58 @@ recording a 0.5 km deep explosion. Arrivals follow the built-in speeds. With
 default settings every pick lands within a sample of truth, and the location
 is within 3 m, depth 17 m and origin time 1 µs.
 
+## Events
+
+An event is a window (clock-corrected time) over member traces. Each member
+has its own alignment within the event, picks belong to an event (one per
+trace, phase and event), and each event has its own origin. Status is
+*automatic* (from detection, replaced when detection re-runs), *reviewed*
+(accepted or made by an analyst; any edit to an automatic event reviews it)
+or *rejected* (kept; exported later as the noise class).
+
+**Reviewing an event** (open it from the catalogue) scopes the track view and
+the Align, Pick and Locate windows to it: rows show its offsets, picks and
+predicted arrivals, non-members are dimmed and skipped, its window is shaded,
+and picks and shifts are recorded in it. **Events ▸ Close review** (or `Esc`)
+returns to the global offsets, picks and origin used outside events.
+
+**Events ▸ Detect…**
+
+1. Each assigned track's plotted series streams through its phenomenology's
+   detector in chunks of 4096 samples, as a live feed would; a stream and a
+   whole file give identical triggers. Detectors: classic or recursive
+   STA/LTA on energy, RMS energy above a level, and excess kurtosis over a
+   window. Defaults are the picker's STA/LTA windows.
+2. Each trigger is refined to an onset by AIC, with an uncertainty.
+3. Association: a source within the radius *R* of a sensor emits at most
+   *R*/*v* before an arrival there, so each onset bounds the origin time to
+   `[t − R/v, t]` (unknown propagation: a fixed window). Onsets join a cluster,
+   seeded from the earliest unused one, while those intervals intersect: EMP
+   onsets must agree to microseconds, infrasound within minutes. One onset per
+   trace; later onsets on a member trace within its coda (the spread of its
+   phases at *R*) are absorbed, so S waves do not make events. A cluster needs
+   the minimum number of distinct sensors.
+4. With four or more located members the cluster is located; the onset with
+   the worst residual beyond the outlier limit (in pick σ) is dropped and the
+   event relocated until none remain.
+
+Results list each candidate; **Apply** adds the events with their picks and
+origins as one undoable command, first removing automatic events if
+**Replace automatic events** is on.
+
+**Events ▸ Catalogue…** lists events by time with duration, members,
+phenomenologies, origin and status (filterable). Click a time or **Review**
+to review it; ✔ accepts, ✘ rejects, 🗑 deletes it with its picks; check
+two or more and **Merge** (union of windows and members, picks moved unless
+their slot is taken). For synthetic data a *vs truth* column shows the
+nearest known event.
+
+`--swarm` (or **Demo ▸ Synthetic swarm**) writes eight seismic stations
+(100 Hz, 130 s) recording six events at 3 km depth, one too weak to detect,
+plus four single-station glitches. With default settings detection finds the
+five detectable events with all eight members each and no false events;
+locations fall within 25 m and 8 ms of truth.
+
 ## Transforms
 
 The **Transform** menu turns each selected squiggle into new ones, added to
@@ -327,7 +389,8 @@ squiggle-app/    the Bevy application
   src/strips.rs      spectrogram strips
   src/process_ui.rs  filter and align windows
   src/locate_ui.rs   pick and locate windows, alignment across phenomenologies
-  src/synthetic.rs   synthetic alignment and located events
+  src/events_ui.rs   detection, association, catalogue, event edits
+  src/synthetic.rs   synthetic alignment, located and swarm events
   src/project_ui.rs  import, sensor and phenomenology windows
   assets/shaders/squiggle_line.wgsl   screen-space polyline expansion
   src/plot/      camera, input, meshing, overlay
@@ -398,11 +461,17 @@ tests check STA/LTA forms (streamed equals whole), triggers, AIC and onsets
 within two samples; locator tests recover sources from exact arrivals, with
 mixed phenomenologies anchored on the fastest. Project tests cover locks,
 reverts, processing validation, picks (per-phase replacement, manual locks,
-clock correction) and sensor locations.
+clock correction), sensor locations, and events (per-event alignment, origin
+and picks, validation, removal with undo). Detector tests check each detector
+finds each burst once and that chunked runs (1, 7, 4096, 65 537 samples) match
+whole runs exactly; association tests separate events from S phases and
+noise, drop a wrong arrival by residual, and refuse too few sensors.
 `squiggle-io` tests each reader on synthesised files (Steim1/2 round trips,
 both SAC byte orders, SigMF pairs, raw layouts), record merging with gaps,
 source chunking, and change detection. `squiggle-app` tests the mesh
 builder's topology, import validation, LOD bucketing, undo/redo through the
 log, the synthetic events, manual pick placement, moveout and pick alignment,
-argument parsing, and the M4 self-check: pick and locate the synthetic
-located event within tolerance.
+argument parsing, event split, merge and edit rules, saving events, the M4
+self-check (pick and locate the synthetic located event within tolerance) and
+the M5 self-check (detect the swarm at known recall and precision, chunked
+and whole runs identical, re-runs keeping reviewed events).
