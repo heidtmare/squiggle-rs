@@ -54,7 +54,7 @@ impl Default for DemoOptions {
 }
 
 pub const USAGE: &str = "\
-Usage: squiggle-app [--project FILE | --synthetic | --located | --swarm] [--squiggles N] [--samples N]
+Usage: squiggle-app [--project FILE | --synthetic | --located | --swarm | --mixed] [--squiggles N] [--samples N]
                     [--demo SCENE] [--screenshot FILE] [WAVEFORM...]
 
   WAVEFORM...        import these files at startup (miniSEED, SAC, SigMF,
@@ -65,6 +65,9 @@ Usage: squiggle-app [--project FILE | --synthetic | --located | --swarm] [--squi
                      known source (picking and location demo)
   --swarm            start with two minutes of synthetic seismic data holding
                      several events and glitches (detection demo)
+  --mixed            start with seven minutes of synthetic earthquakes and
+                     explosions on seismic and infrasound sensors
+                     (classification demo)
   --squiggles N      put N squiggles on the plot at startup (default 0)
   --samples N        samples per generated squiggle (default 1000)
   --demo SCENE       open a transform demo: fourier or wavelet
@@ -109,6 +112,7 @@ impl DemoOptions {
                 "--synthetic" => options.synthetic = Some(SyntheticEvent::Alignment),
                 "--located" => options.synthetic = Some(SyntheticEvent::Located),
                 "--swarm" => options.synthetic = Some(SyntheticEvent::Swarm),
+                "--mixed" => options.synthetic = Some(SyntheticEvent::Mixed),
                 "--help" | "-h" => return Err(USAGE.to_string()),
                 other if other.starts_with('-') => {
                     return Err(format!("unrecognised argument: {other}\n\n{USAGE}"));
@@ -247,6 +251,7 @@ mod tests {
         assert_eq!(parse(&["--synthetic"]).unwrap().synthetic, Some(SyntheticEvent::Alignment));
         assert_eq!(parse(&["--located"]).unwrap().synthetic, Some(SyntheticEvent::Located));
         assert_eq!(parse(&["--swarm"]).unwrap().synthetic, Some(SyntheticEvent::Swarm));
+        assert_eq!(parse(&["--mixed"]).unwrap().synthetic, Some(SyntheticEvent::Mixed));
     }
 
     #[test]

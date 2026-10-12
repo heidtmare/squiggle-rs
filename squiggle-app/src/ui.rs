@@ -19,6 +19,7 @@ use squiggle_core::{
 
 use crate::demo::{self, DemoOptions};
 use crate::plot::{AddSquiggle, FitToData, Plot, PlotCamera, PlotMode, RemoveSquiggle, SquiggleModel};
+use crate::classify_ui::{self, ClassifyWindows};
 use crate::events_ui::{self, EventWindows};
 use crate::locate_ui::{self, LocateWindows};
 use crate::process_ui::{self, ProcessWindows};
@@ -45,10 +46,19 @@ impl Plugin for UiPlugin {
             .init_resource::<ProcessWindows>()
             .init_resource::<LocateWindows>()
             .init_resource::<EventWindows>()
+            .init_resource::<ClassifyWindows>()
             .add_systems(Startup, setup)
             .add_systems(
                 EguiPrimaryContextPass,
-                (chrome, tracks::tracks_ui, project_ui::windows, process_ui::windows, locate_ui::windows, events_ui::windows)
+                (
+                    chrome,
+                    tracks::tracks_ui,
+                    project_ui::windows,
+                    process_ui::windows,
+                    locate_ui::windows,
+                    events_ui::windows,
+                    classify_ui::windows,
+                )
                     .chain(),
             );
     }
@@ -74,6 +84,7 @@ pub struct TrackAccess<'w, 's> {
     process: ResMut<'w, ProcessWindows>,
     locate: ResMut<'w, LocateWindows>,
     events: ResMut<'w, EventWindows>,
+    classify: ResMut<'w, ClassifyWindows>,
 }
 
 /// Which parts of the chrome are open.
@@ -310,7 +321,9 @@ fn menu_bar(
         });
         ui.menu_button("Events", |ui| {
             events_ui::events_menu(ui, &mut tracks.events, &mut tracks.view);
-            if tracks.events.detect_open || tracks.events.catalogue_open {
+            ui.separator();
+            classify_ui::classify_menu(ui, &mut tracks.classify);
+            if tracks.events.detect_open || tracks.events.catalogue_open || tracks.classify.features_open {
                 *tracks.mode = PlotMode::Tracks;
             }
         });
@@ -341,6 +354,14 @@ fn menu_bar(
                 .clicked()
             {
                 project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Swarm));
+                ui.close();
+            }
+            if ui
+                .button("Synthetic earthquakes and explosions")
+                .on_hover_text("A new project: seven minutes of five earthquakes and five explosions on seismic and infrasound sensors")
+                .clicked()
+            {
+                project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Mixed));
                 ui.close();
             }
             ui.separator();
@@ -766,7 +787,8 @@ fn about_window(ctx: &egui::Context, chrome: &mut Chrome) {
             ui.separator();
             ui.label("Process ▸ Filter and detrend preprocesses selected tracks; Process ▸ Align measures and applies delays.");
             ui.label("Process ▸ Pick finds onsets; Process ▸ Locate fits source position and origin time, and removes moveout.");
-            ui.label("Events ▸ Detect finds and associates events; Events ▸ Catalogue reviews them. ⌘/Ctrl+drag makes an event; drag its edges to resize; right-click to split. While reviewing: ] / [ next and previous, A accept, R reject, Esc close.");
+            ui.label("Events ▸ Detect finds and associates events; Events ▸ Catalogue reviews them. ⌘/Ctrl+drag makes an event; drag its edges to resize; right-click to split. While reviewing: ] / [ next and previous, A accept, R reject, 1–9 label, Esc close.");
+            ui.label("Events ▸ Classify runs features and the rules classifier; Features shows the reviewed event's evidence; Labels edits the taxonomy; Export dataset writes Parquet for training.");
             ui.label("Edits to processing, offsets, picks, sensor locations, origins and events undo with ⌘Z / Ctrl+Z and redo with ⇧⌘Z.");
             ui.label("Transform turns the selected squiggles, or the visible part of selected tracks, into spectra or wavelet levels.");
         });

@@ -6,6 +6,9 @@ license.workspace = true
 description = "Waveform readers and project persistence for Squiggle."
 
 [dependencies]
+arrow-array = "60"
+arrow-schema = "60"
+parquet = { version = "60", default-features = false, features = ["arrow", "snap"] }
 squiggle-core = { workspace = true, features = ["serde"] }
 serde.workspace = true
 serde_json.workspace = true

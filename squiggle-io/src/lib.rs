@@ -5,6 +5,7 @@
 //! project can detect when a referenced file has changed.
 
 mod csv;
+pub mod dataset;
 mod decode;
 mod mseed;
 pub mod raw;

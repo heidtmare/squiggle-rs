@@ -13,9 +13,15 @@
 //! cluster needs `min_sensors` distinct sensors; with enough located members
 //! it is located, and arrivals whose residual exceeds `outlier_sigma` are
 //! dropped (worst first) and the event relocated.
+//!
+//! Slow arrivals, whose origin window is wider than `max_window_s` (e.g.
+//! infrasound at a 50 km radius: 147 s), would join any cluster and pull its
+//! location. They are held back: once an event is located from the others,
+//! each such trace contributes its arrival nearest the predicted time, if
+//! within `outlier_sigma`. The rest cluster among themselves afterwards.
 
 use crate::id::Id;
-use crate::locate::{Fit, LocateSettings, Observation, locate};
+use crate::locate::{Fit, LocateSettings, Observation, locate, travel_time};
 use crate::sensor::Location;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -70,6 +76,12 @@ fn origin_bounds(a: &Arrival, settings: &AssociateSettings) -> (f64, f64) {
     (a.time - reach, a.time)
 }
 
+/// Whether `a`'s origin window is too wide to seed or join clusters of faster arrivals.
+fn is_wide(a: &Arrival, settings: &AssociateSettings) -> bool {
+    let (lo, hi) = origin_bounds(a, settings);
+    hi - lo > settings.max_window_s
+}
+
 fn distinct_sensors(arrivals: &[Arrival], members: &[usize]) -> usize {
     let mut sensors: Vec<Id> = members.iter().map(|&i| arrivals[i].sensor).collect();
     sensors.sort_unstable();
@@ -97,9 +109,43 @@ fn fit(arrivals: &[Arrival], members: &[usize], settings: &AssociateSettings) ->
 pub fn associate(arrivals: &[Arrival], settings: &AssociateSettings) -> Vec<Candidate> {
     let mut order: Vec<usize> = (0..arrivals.len()).filter(|&i| arrivals[i].time.is_finite()).collect();
     order.sort_by(|&a, &b| arrivals[a].time.total_cmp(&arrivals[b].time));
+    let (wide, narrow): (Vec<usize>, Vec<usize>) = order.iter().partition(|&&i| is_wide(&arrivals[i], settings));
     let mut used = vec![false; arrivals.len()];
-    let mut candidates = Vec::new();
+    let mut candidates = cluster(arrivals, &narrow, &mut used, settings);
 
+    for candidate in &mut candidates {
+        let Some(fit) = &candidate.fit else { continue };
+        let mut traces: Vec<Id> = candidate.arrivals.iter().map(|&i| arrivals[i].trace).collect();
+        for &i in &wide {
+            let a = &arrivals[i];
+            if used[i] || traces.contains(&a.trace) {
+                continue;
+            }
+            let (Some(location), Some(speed)) = (a.location, a.speed_m_s) else { continue };
+            let predicted = fit.origin + travel_time(fit.source, &location, speed);
+            let nearest = wide
+                .iter()
+                .copied()
+                .filter(|&j| !used[j] && arrivals[j].trace == a.trace)
+                .min_by(|&x, &y| (arrivals[x].time - predicted).abs().total_cmp(&(arrivals[y].time - predicted).abs()))
+                .expect("i qualifies");
+            let b = &arrivals[nearest];
+            if (b.time - predicted).abs() <= settings.outlier_sigma * b.sigma_s {
+                used[nearest] = true;
+                traces.push(b.trace);
+                candidate.arrivals.push(nearest);
+            }
+        }
+        candidate.arrivals.sort_by(|&a, &b| arrivals[a].time.total_cmp(&arrivals[b].time));
+    }
+    candidates.extend(cluster(arrivals, &wide, &mut used, settings));
+    candidates.sort_by(|a, b| arrivals[a.arrivals[0]].time.total_cmp(&arrivals[b.arrivals[0]].time));
+    candidates
+}
+
+/// Clusters `order` (time-sorted indices), skipping and marking `used`.
+fn cluster(arrivals: &[Arrival], order: &[usize], used: &mut [bool], settings: &AssociateSettings) -> Vec<Candidate> {
+    let mut candidates = Vec::new();
     for (position, &seed) in order.iter().enumerate() {
         if used[seed] {
             continue;
@@ -147,7 +193,7 @@ pub fn associate(arrivals: &[Arrival], settings: &AssociateSettings) -> Vec<Cand
         for &m in &members {
             used[m] = true;
             let (trace, from, coda) = (arrivals[m].trace, arrivals[m].time, arrivals[m].coda_s);
-            for &i in &order {
+            for &i in order {
                 if !used[i] && arrivals[i].trace == trace && arrivals[i].time > from && arrivals[i].time <= from + coda {
                     used[i] = true;
                     absorbed.push(i);
@@ -241,6 +287,27 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].arrivals.len(), 8);
         assert!(!candidates[0].arrivals.contains(&2));
+    }
+
+    #[test]
+    fn slow_arrivals_attach_only_where_predicted() {
+        let net = Net::new();
+        let mut arrivals = net.arrivals(source(0.0, 0.0), 10.0, 0..6);
+        arrivals.extend(net.arrivals(source(4.0, -3.0), 40.0, 0..6));
+        // Two microphones hear the second source only, plus a stray arrival.
+        let mics: Vec<(Id, Id, Location)> = [(1.0, 0.5), (-1.5, -1.0)].iter().map(|&(e, n)| (Id::generate(), Id::generate(), at(e, n))).collect();
+        for &(trace, sensor, location) in &mics {
+            let time = 40.0 + travel_time(source(4.0, -3.0), &location, 340.0);
+            arrivals.push(Arrival { trace, sensor, time, speed_m_s: Some(340.0), location: Some(location), sigma_s: 0.05, coda_s: 0.0 });
+        }
+        arrivals.push(Arrival { time: 25.0, ..arrivals[12] });
+        let candidates = associate(&arrivals, &AssociateSettings::default());
+        assert_eq!(candidates.len(), 2, "{candidates:?}");
+        assert_eq!(candidates[0].arrivals.len(), 6);
+        assert_eq!(candidates[1].arrivals.len(), 8);
+        assert!(candidates[1].arrivals.contains(&12) && candidates[1].arrivals.contains(&13));
+        let fit = candidates[1].fit.as_ref().unwrap();
+        assert!((fit.origin - 40.0).abs() < 1e-4);
     }
 
     #[test]
