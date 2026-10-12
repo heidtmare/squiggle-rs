@@ -12,7 +12,7 @@ use bevy::tasks::{AsyncComputeTaskPool, IoTaskPool, Task, futures::check_ready};
 use bevy::window::FileDragAndDrop;
 use squiggle_core::locate::Source;
 use squiggle_core::{
-    Analyst, Change, Id, Location, Op, PhenomenologyId, Project, RawLayout, Rgba, SampleBuf, Suggestion, Timestamp,
+    Analyst, Change, Id, LabelId, Location, Op, PhenomenologyId, Project, RawLayout, Rgba, SampleBuf, Suggestion, Timestamp,
     Trace, TraceSamples, TraceSource,
 };
 use squiggle_io::{FileRead, PROJECT_EXTENSION, ProjectStore, ReadError, SqliteStore};
@@ -71,6 +71,8 @@ pub enum SyntheticEvent {
     Located,
     /// Several events and glitches over two minutes.
     Swarm,
+    /// Earthquakes and explosions with their discriminating signatures.
+    Mixed,
 }
 
 pub enum SampleState {
@@ -95,6 +97,8 @@ pub struct Workspace {
     pub truth_origin: Option<(Source, Timestamp)>,
     /// Known events (source, origin time); synthetic data only.
     pub truth_events: Vec<(Source, Timestamp)>,
+    /// Known class of each of `truth_events`, when it has one.
+    pub truth_labels: Vec<LabelId>,
     log: Vec<Op>,
     /// Ops a fresh project starts with; more than this and an unsaved project has edits.
     created_ops: usize,
@@ -126,6 +130,7 @@ impl Workspace {
             truth: HashMap::new(),
             truth_origin: None,
             truth_events: Vec::new(),
+            truth_labels: Vec::new(),
             created_ops: log.len(),
             log,
             store: None,
@@ -254,7 +259,7 @@ impl Workspace {
         let store = SqliteStore::open(path).map_err(|e| e.to_string())?;
         let log = store.load().map_err(|e| e.to_string())?;
         let project = Project::replay(&log).map_err(|e| format!("{}: {e}", path.display()))?;
-        Ok(Self {
+        let mut workspace = Self {
             project,
             analyst,
             path: Some(path.to_path_buf()),
@@ -264,13 +269,19 @@ impl Workspace {
             truth: HashMap::new(),
             truth_origin: None,
             truth_events: Vec::new(),
+            truth_labels: Vec::new(),
             created_ops: log.len(),
             log,
             store: Some(Mutex::new(store)),
             revision: 1,
             undo: Vec::new(),
             redo: Vec::new(),
-        })
+        };
+        // Projects saved before labels existed get the seed taxonomy.
+        for change in workspace.project.seed_taxonomy() {
+            workspace.commit(change)?;
+        }
+        Ok(workspace)
     }
 
     /// A project holding a synthetic event and its truth.
@@ -290,6 +301,10 @@ impl Workspace {
                 let paths = synthetic::write_swarm(&dir.join("swarm"))?;
                 let phenomenologies = vec!["seismic"; paths.len()];
                 ("Synthetic swarm", paths, phenomenologies)
+            }
+            SyntheticEvent::Mixed => {
+                let (paths, phenomenologies) = synthetic::write_mixed(&dir.join("mixed"))?.into_iter().unzip();
+                ("Synthetic earthquakes and explosions", paths, phenomenologies)
             }
         };
         next.commit(Change::RenameProject { name: name.to_string() })?;
@@ -313,6 +328,11 @@ impl Workspace {
             }
             SyntheticEvent::Swarm => {
                 next.truth_events = synthetic::SWARM.iter().map(|e| (e.source(), origin.add_seconds(e.origin))).collect();
+                return Ok(next);
+            }
+            SyntheticEvent::Mixed => {
+                next.truth_events = synthetic::MIXED.iter().map(|e| (e.source(), origin.add_seconds(e.origin))).collect();
+                next.truth_labels = synthetic::MIXED.iter().map(|e| LabelId::new(e.class.label())).collect();
                 return Ok(next);
             }
             SyntheticEvent::Alignment => {}

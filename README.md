@@ -31,6 +31,12 @@ them through Fourier and wavelet transforms without leaving the plot.
   phenomenology's propagation, located and outlier-pruned; a catalogue to
   review, accept, reject, split and merge; events brushed by hand. Each event
   carries its own members, offsets, picks and origin.
+- **Classification.** Per-member and per-event features (time domain,
+  spectral, wavelet, across sensors) and earthquake/explosion discriminants
+  (P/S ratio, spectral ratio, first motion, depth, coupled air and EM
+  arrivals); a transparent rules classifier; an extensible label taxonomy
+  seeded with earthquake, explosion and other; a review queue ordered by
+  uncertainty; training datasets exported as Parquet.
 - **Spectrogram strips** per row, two-sided for I/Q.
 - **Independent axis zoom.** Zoom x and y together or separately, anchored on
   the point under the cursor — waveform axes rarely share a unit.
@@ -65,6 +71,7 @@ already compiles dependencies with optimizations in dev profiles.
 | `--synthetic` | Start with a synthetic event of known delays (see [Alignment](#alignment)) |
 | `--located` | Start with a synthetic EMP, seismic and infrasound event of known source (see [Picking and location](#picking-and-location)) |
 | `--swarm` | Start with two minutes of synthetic seismic data holding six events and glitches (see [Events](#events)) |
+| `--mixed` | Start with seven minutes of synthetic earthquakes and explosions on seismic and infrasound sensors (see [Classification](#classification)) |
 | `WAVEFORM...` | Import these files (any format below) |
 | `--squiggles N` | Start with `N` demo squiggles |
 | `--samples N` | Samples per demo squiggle |
@@ -92,6 +99,7 @@ one row each, on a shared time axis; it opens when traces are loaded.
 | Resize the reviewed event | Drag its window edge |
 | Split it, add or remove a member | Right-click a row |
 | Next / previous event, accept, reject, close | `]` / `[`, `A`, `R`, `Esc` while reviewing |
+| Label the reviewed event | `1`–`9` (taxonomy order, see **Events ▸ Labels…**) |
 | Nudge selected tracks | `←` / `→` one sample, with `Shift` ten |
 | Frame every trace | **Fit**, or double-click |
 | Order rows | **Rows by** in the toolbar |
@@ -320,23 +328,82 @@ returns to the global offsets, picks and origin used outside events.
 4. With four or more located members the cluster is located; the onset with
    the worst residual beyond the outlier limit (in pick σ) is dropped and the
    event relocated until none remain.
+5. Slow onsets, whose origin window exceeds the unknown-propagation window
+   (infrasound at 50 km: 147 s), would join any cluster and pull its
+   location, so they are held back: each located event takes, per such
+   trace, the onset nearest its predicted arrival if within the outlier
+   limit. The rest cluster among themselves.
 
 Results list each candidate; **Apply** adds the events with their picks and
 origins as one undoable command, first removing automatic events if
 **Replace automatic events** is on.
 
 **Events ▸ Catalogue…** lists events by time with duration, members,
-phenomenologies, origin and status (filterable). Click a time or **Review**
-to review it; ✔ accepts, ✘ rejects, 🗑 deletes it with its picks; check
-two or more and **Merge** (union of windows and members, picks moved unless
-their slot is taken). For synthetic data a *vs truth* column shows the
-nearest known event.
+phenomenologies, origin, predicted class, label and status (filterable).
+Click a time or **Review** to review it; ✔ accepts (taking the predicted
+label when unlabelled), ✘ rejects, 🗑 deletes it with its picks; check two
+or more and **Merge** (union of windows and members, picks moved unless their
+slot is taken). **Queue** lists automatic events, most uncertain first, and
+`]` / `[` follow it. For synthetic data a *vs truth* column shows the nearest
+known event and its class.
 
 `--swarm` (or **Demo ▸ Synthetic swarm**) writes eight seismic stations
 (100 Hz, 130 s) recording six events at 3 km depth, one too weak to detect,
 plus four single-station glitches. With default settings detection finds the
 five detectable events with all eight members each and no false events;
 locations fall within 25 m and 8 ms of truth.
+
+## Classification
+
+**Features** (`heidtmare.squiggle.features/1`, computed by `squiggle-core` so
+a trainer computes the same) use each member's plotted series over the event
+window, from its first pick:
+
+- *Member:* SNR, peak, RMS, envelope duration, rise and exponential decay,
+  zero-crossing rate, kurtosis; dominant frequency, centroid, bandwidth,
+  85 % roll-off, flatness, log₁₀ high/low band energy; Db4 wavelet energy
+  share for six levels.
+- *Event:* members, sensors, phenomenologies, depth and residual RMS, arrival
+  spread, apparent velocity and back-azimuth (plane wave over the dominant
+  phenomenology's picks), amplitude spread.
+- *Discriminants* (seismic-like traces: phases named P and S): median log₁₀
+  P/S peak ratio (windows from picks, else predicted from the origin), median
+  high/low spectral ratio, mean first-motion sign; and the SNR of air
+  (< 1 km/s) and EM (> 10⁸ m/s) arrivals at their predicted times on any such
+  trace, member or not.
+
+**Events ▸ Classify…** runs the features and the rules classifier on every
+event and records a prediction per event (`heidtmare.squiggle.model/rules@1`,
+with its config hash and taxonomy version) as one undoable command; status and
+label are untouched. Each rule adds clamped log-odds toward explosion: P/S
+and spectral ratio above thresholds, a source shallower than 2 km,
+compressional first motions, a coupled air or EM arrival. The share left to
+*other* grows as fewer discriminants are available. Thresholds and bands are
+editable.
+
+**Events ▸ Features…** shows the reviewed event's probabilities, each rule's
+evidence, recorded predictions (flagged when made under an older taxonomy),
+event features and per-member features, with a label picker and Accept.
+
+**Events ▸ Labels…** edits the taxonomy: rename, add subtypes under any
+label, remove unused ones. Each change bumps the taxonomy version. Projects
+saved before labels existed are given the seed labels on opening.
+
+**Events ▸ Export dataset…** writes `events.parquet`, `members.parquet` and
+`dataset.json` (`heidtmare.squiggle.dataset/1`) to a folder: one row per
+labelled event (rejected events as class `noise`; optionally unlabelled ones),
+its class and ancestry path, provenance, prediction and features, and one row
+per member with sensor, phenomenology, onset and member features. The
+manifest records the feature set, taxonomy and its version, class counts and
+file hashes; the Parquet schemas carry the same metadata.
+
+`--mixed` (or **Demo ▸ Synthetic earthquakes and explosions**) writes eight
+seismic stations (100 Hz) and two infrasound sensors (20 Hz) over 420 s with
+five earthquakes (5–11 km deep, weak low-frequency P with a quadrant
+first-motion pattern, strong S) and five explosions (0.2–0.5 km, strong
+high-frequency compressional P, weak S, an infrasound arrival). Detect with
+defaults finds all ten, explosions with their infrasound; Classify labels all
+ten correctly at 95 %.
 
 ## Transforms
 
@@ -382,7 +449,7 @@ cargo run -p squiggle-app --release -- --demo fourier --screenshot fourier.png
 
 ```
 squiggle-core/   model, project op log, time, samples, LOD, transforms, DSP; no dependencies (optional serde)
-squiggle-io/     readers (miniSEED, SAC, SigMF, WAV, CSV, raw), sources, SQLite project store
+squiggle-io/     readers (miniSEED, SAC, SigMF, WAV, CSV, raw), sources, SQLite project store, Parquet datasets
 squiggle-app/    the Bevy application
   src/workspace.rs   open project, async file I/O
   src/tracks.rs      stacked tracks: LOD meshes, time axis, labels, shifting
@@ -390,7 +457,8 @@ squiggle-app/    the Bevy application
   src/process_ui.rs  filter and align windows
   src/locate_ui.rs   pick and locate windows, alignment across phenomenologies
   src/events_ui.rs   detection, association, catalogue, event edits
-  src/synthetic.rs   synthetic alignment, located and swarm events
+  src/classify_ui.rs features, rules, labels, review queue, dataset export
+  src/synthetic.rs   synthetic alignment, located, swarm and mixed scenes
   src/project_ui.rs  import, sensor and phenomenology windows
   assets/shaders/squiggle_line.wgsl   screen-space polyline expansion
   src/plot/      camera, input, meshing, overlay
@@ -465,13 +533,23 @@ clock correction), sensor locations, and events (per-event alignment, origin
 and picks, validation, removal with undo). Detector tests check each detector
 finds each burst once and that chunked runs (1, 7, 4096, 65 537 samples) match
 whole runs exactly; association tests separate events from S phases and
-noise, drop a wrong arrival by residual, and refuse too few sensors.
+noise, drop a wrong arrival by residual, attach slow arrivals only where
+predicted, and refuse too few sensors. Feature tests check analytic signals:
+a sine's peak, RMS, zero crossings, kurtosis (1.5), dominant frequency and
+flatness; white noise's kurtosis (3) and flatness; a burst's onset, decay
+constant and duration; a two-tone band ratio and wavelet level; a plane
+wave's speed and back-azimuth. Taxonomy, rules and label/prediction undo
+have their own tests.
 `squiggle-io` tests each reader on synthesised files (Steim1/2 round trips,
 both SAC byte orders, SigMF pairs, raw layouts), record merging with gaps,
-source chunking, and change detection. `squiggle-app` tests the mesh
+source chunking, change detection, and Parquet tables with nulls and
+metadata. `squiggle-app` tests the mesh
 builder's topology, import validation, LOD bucketing, undo/redo through the
 log, the synthetic events, manual pick placement, moveout and pick alignment,
 argument parsing, event split, merge and edit rules, saving events, the M4
 self-check (pick and locate the synthetic located event within tolerance) and
 the M5 self-check (detect the swarm at known recall and precision, chunked
-and whole runs identical, re-runs keeping reviewed events).
+and whole runs identical, re-runs keeping reviewed events) and the M6
+self-check (the mixed scene's earthquakes and explosions separated by each
+discriminant and all classified correctly; queue order, accept and undo;
+dataset classes, noise and subtype paths).

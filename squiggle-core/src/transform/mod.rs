@@ -9,7 +9,7 @@
 mod complex;
 mod fft;
 mod spectrum;
-mod wavelet;
+pub mod wavelet;
 
 use core::f64::consts::TAU;
 use core::fmt;

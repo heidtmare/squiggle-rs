@@ -6,11 +6,12 @@
 use core::fmt;
 
 use crate::dsp::Processing;
-use crate::event::{Event, EventStatus};
+use crate::event::{Event, EventStatus, Prediction};
 use crate::id::Id;
 use crate::locate::Origin;
 use crate::phenomenology::{self, Phenomenology, PhenomenologyId};
 use crate::sensor::{Alignment, Analyst, Assignment, ClockCorrection, Location, Pick, Provenance, Sensor, Trace};
+use crate::taxonomy::{self, Label, LabelId, Taxonomy};
 use crate::time::Timestamp;
 
 /// Project file format identifier.
@@ -78,6 +79,12 @@ pub enum Change {
     SetEvent(Event),
     /// Also removes the event's picks.
     RemoveEvent { event: Id },
+    /// Adds or replaces a label; bumps the taxonomy version.
+    DefineLabel(Label),
+    /// Refused while an event or a subtype uses it.
+    RemoveLabel { label: LabelId },
+    /// Replaces the event's predictions; leaves its status alone.
+    SetPredictions { event: Id, predictions: Vec<Prediction> },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -103,6 +110,8 @@ pub enum ApplyError {
     UnknownEvent(Id),
     NotMember { event: Id, trace: Id },
     InvalidEvent(String),
+    UnknownLabel(LabelId),
+    InvalidLabel(String),
 }
 
 impl fmt::Display for ApplyError {
@@ -129,6 +138,8 @@ impl fmt::Display for ApplyError {
             Self::UnknownEvent(id) => write!(f, "no event {id}"),
             Self::NotMember { event, trace } => write!(f, "trace {trace} is not a member of event {event}"),
             Self::InvalidEvent(why) => write!(f, "invalid event: {why}"),
+            Self::UnknownLabel(id) => write!(f, "no label {id}"),
+            Self::InvalidLabel(why) => write!(f, "invalid label: {why}"),
         }
     }
 }
@@ -147,14 +158,16 @@ pub struct Project {
     /// Located source outside any event.
     pub origin: Option<Origin>,
     events: Vec<Event>,
+    taxonomy: Taxonomy,
 }
 
 impl Project {
-    /// A new project with the built-in phenomenologies, and the ops that created it.
+    /// A new project with the built-in phenomenologies and seed labels, and the ops that created it.
     pub fn create(name: impl Into<String>, analyst: &Analyst) -> (Self, Vec<Op>) {
         let mut project = Self::default();
         let mut changes = vec![Change::CreateProject { id: Id::generate(), name: name.into() }];
         changes.extend(phenomenology::builtins().into_iter().map(Change::DefinePhenomenology));
+        changes.extend(taxonomy::seed().into_iter().map(Change::DefineLabel));
         let ops = changes
             .into_iter()
             .map(|change| project.commit(analyst, change).expect("built-ins are consistent"))
@@ -347,6 +360,26 @@ impl Project {
                 self.events.remove(index);
                 self.picks.retain(|p| p.event != Some(*event));
             }
+            Change::DefineLabel(label) => {
+                self.taxonomy.check(label).map_err(ApplyError::InvalidLabel)?;
+                match self.taxonomy.labels.iter_mut().find(|l| l.id == label.id) {
+                    Some(existing) => *existing = label.clone(),
+                    None => self.taxonomy.labels.push(label.clone()),
+                }
+                self.taxonomy.version += 1;
+            }
+            Change::RemoveLabel { label } => {
+                let index = self.taxonomy.labels.iter().position(|l| &l.id == label).ok_or_else(|| ApplyError::UnknownLabel(label.clone()))?;
+                if self.events.iter().any(|e| e.label.as_ref() == Some(label)) {
+                    return Err(ApplyError::InvalidLabel(format!("events are labelled {label}")));
+                }
+                if self.taxonomy.labels.iter().any(|l| l.parent.as_ref() == Some(label)) {
+                    return Err(ApplyError::InvalidLabel(format!("{label} has subtypes")));
+                }
+                self.taxonomy.labels.remove(index);
+                self.taxonomy.version += 1;
+            }
+            Change::SetPredictions { event, predictions } => self.event_mut(*event)?.predictions = predictions.clone(),
         }
         Ok(())
     }
@@ -362,6 +395,11 @@ impl Project {
             if event.members[..i].iter().any(|m| m.trace == member.trace) {
                 return Err(ApplyError::InvalidEvent("a trace is listed twice".to_string()));
             }
+        }
+        if let Some(label) = &event.label
+            && self.taxonomy.get(label).is_none()
+        {
+            return Err(ApplyError::UnknownLabel(label.clone()));
         }
         Ok(())
     }
@@ -422,8 +460,28 @@ impl Project {
                 );
                 Some(changes)
             }
+            Change::DefineLabel(label) => one(Some(match self.taxonomy.get(&label.id) {
+                Some(old) => Change::DefineLabel(old.clone()),
+                None => Change::RemoveLabel { label: label.id.clone() },
+            })),
+            Change::RemoveLabel { label } => one(self.taxonomy.get(label).map(|l| Change::DefineLabel(l.clone()))),
+            Change::SetPredictions { event, .. } => {
+                one(self.event(*event).map(|e| Change::SetPredictions { event: *event, predictions: e.predictions.clone() }))
+            }
             _ => None,
         }
+    }
+
+    pub fn taxonomy(&self) -> &Taxonomy {
+        &self.taxonomy
+    }
+
+    /// Seed labels for a project saved before labels existed.
+    pub fn seed_taxonomy(&self) -> Vec<Change> {
+        if self.taxonomy.version > 0 {
+            return Vec::new();
+        }
+        taxonomy::seed().into_iter().map(Change::DefineLabel).collect()
     }
 
     /// Picks a [`Change::SetPick`] of `pick` would replace.
@@ -592,7 +650,50 @@ mod tests {
     fn a_new_project_carries_the_builtins() {
         let (project, ops) = Project::create("p", &analyst());
         assert_eq!(project.phenomenologies().len(), phenomenology::builtins().len());
-        assert_eq!(ops.len(), 1 + phenomenology::builtins().len());
+        assert_eq!(ops.len(), 1 + phenomenology::builtins().len() + taxonomy::seed().len());
+        assert_eq!(project.taxonomy().labels, taxonomy::seed());
+        assert!(project.seed_taxonomy().is_empty());
+    }
+
+    #[test]
+    fn labels_validate_and_undo() {
+        let (mut project, _) = Project::create("p", &analyst());
+        let t = assigned(&mut project);
+        let quarry = Label { id: LabelId::new("quarry"), name: "Quarry".into(), parent: Some(LabelId::new("explosion")), expects: vec![] };
+        let version = project.taxonomy().version;
+        let undo = project.inverse(&Change::DefineLabel(quarry.clone())).unwrap();
+        project.commit(&analyst(), Change::DefineLabel(quarry.clone())).unwrap();
+        assert_eq!(project.taxonomy().version, version + 1);
+
+        let labelled = Event { label: Some(quarry.id.clone()), ..event(&[t.id]) };
+        project.commit(&analyst(), Change::AddEvent(labelled.clone())).unwrap();
+        let remove = Change::RemoveLabel { label: quarry.id.clone() };
+        assert!(matches!(project.commit(&analyst(), remove.clone()), Err(ApplyError::InvalidLabel(_))));
+        let parent = Change::RemoveLabel { label: LabelId::new("explosion") };
+        assert!(matches!(project.commit(&analyst(), parent), Err(ApplyError::InvalidLabel(_))));
+        let unknown = Event { label: Some(LabelId::new("nope")), ..event(&[t.id]) };
+        assert!(matches!(project.commit(&analyst(), Change::AddEvent(unknown)), Err(ApplyError::UnknownLabel(_))));
+
+        let prediction = Prediction {
+            model: "m@1".into(),
+            config_hash: "x".into(),
+            taxonomy_version: 1,
+            labels: vec![(LabelId::new("earthquake"), 0.7), (LabelId::new("explosion"), 0.3)],
+        };
+        let set = Change::SetPredictions { event: labelled.id, predictions: vec![prediction] };
+        let undo_prediction = project.inverse(&set).unwrap();
+        project.commit(&analyst(), set).unwrap();
+        assert_eq!(project.event(labelled.id).unwrap().predictions.len(), 1);
+        for change in undo_prediction {
+            project.commit(&analyst(), change).unwrap();
+        }
+        assert!(project.event(labelled.id).unwrap().predictions.is_empty());
+
+        project.commit(&analyst(), Change::RemoveEvent { event: labelled.id }).unwrap();
+        for change in undo {
+            project.commit(&analyst(), change).unwrap();
+        }
+        assert!(project.taxonomy().get(&quarry.id).is_none());
     }
 
     #[test]
@@ -809,6 +910,8 @@ mod tests {
             origin: None,
             status: EventStatus::Auto,
             provenance: Provenance::Auto { stage: "detect".into(), config_hash: "x".into() },
+            label: None,
+            predictions: Vec::new(),
         }
     }
 

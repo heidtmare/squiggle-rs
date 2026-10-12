@@ -21,6 +21,7 @@ use squiggle_core::{
     SampleKind, Timestamp,
 };
 
+use crate::classify_ui::{accept_change, label_change, label_picker, review_order};
 use crate::locate_ui::{Picked, default_pick_settings, pick_change};
 use crate::plot::Plot;
 use crate::process_ui::config_hash;
@@ -203,6 +204,8 @@ pub fn event_changes(project: &Project, meta: &[DetectMeta], outcome: &DetectOut
             origin,
             status: EventStatus::Auto,
             provenance: auto(DETECT_STAGE),
+            label: None,
+            predictions: Vec::new(),
         }));
         for d in &members {
             let m = &meta[d.input];
@@ -234,6 +237,8 @@ pub fn new_event(analyst: &Analyst, start: Timestamp, end: Timestamp, traces: &[
         origin: None,
         status: EventStatus::Reviewed,
         provenance: manual(analyst),
+        label: None,
+        predictions: Vec::new(),
     }
 }
 
@@ -352,6 +357,8 @@ pub struct EventWindows {
     task: Option<(DetectJob, Task<DetectOutcome>)>,
     result: Option<(DetectJob, DetectOutcome)>,
     filter: Option<EventStatus>,
+    /// Catalogue and `]`/`[` follow the review queue: automatic events, most uncertain first.
+    pub queue: bool,
     merge: Vec<Id>,
 }
 
@@ -367,6 +374,7 @@ impl Default for EventWindows {
             task: None,
             result: None,
             filter: None,
+            queue: false,
             merge: Vec::new(),
         }
     }
@@ -408,19 +416,31 @@ pub fn windows(
     }
     detect_window(&ctx, windows, &mut workspace, &tracks);
     catalogue_window(&ctx, windows, &mut workspace, &mut view, &mut tracks, width);
-    review_keys(&ctx, &mut workspace, &mut view, &mut tracks, width);
+    review_keys(&ctx, windows.queue, &mut workspace, &mut view, &mut tracks, width);
     Ok(())
 }
 
-/// While reviewing: `]` / `[` next and previous event, `A` accept, `R` reject, `Esc` close.
-fn review_keys(ctx: &egui::Context, workspace: &mut Workspace, view: &mut TrackView, tracks: &mut Query<&mut Track>, width: f64) {
+/// While reviewing: `]` / `[` next and previous event (in queue order when
+/// queued), `A` accept, `R` reject, `1`–`9` label, `Esc` close.
+fn review_keys(ctx: &egui::Context, queue: bool, workspace: &mut Workspace, view: &mut TrackView, tracks: &mut Query<&mut Track>, width: f64) {
     let Some(current) = view.event else {
         return;
     };
     if ctx.egui_wants_keyboard_input() {
         return;
     }
-    let (next, previous, accept, reject, close) = ctx.input(|i| {
+    const DIGITS: [egui::Key; 9] = [
+        egui::Key::Num1,
+        egui::Key::Num2,
+        egui::Key::Num3,
+        egui::Key::Num4,
+        egui::Key::Num5,
+        egui::Key::Num6,
+        egui::Key::Num7,
+        egui::Key::Num8,
+        egui::Key::Num9,
+    ];
+    let (next, previous, accept, reject, close, digit) = ctx.input(|i| {
         let plain = !i.modifiers.command;
         (
             i.key_pressed(egui::Key::CloseBracket),
@@ -428,24 +448,32 @@ fn review_keys(ctx: &egui::Context, workspace: &mut Workspace, view: &mut TrackV
             plain && i.key_pressed(egui::Key::A),
             plain && i.key_pressed(egui::Key::R),
             i.key_pressed(egui::Key::Escape),
+            DIGITS.iter().position(|k| plain && i.key_pressed(*k)),
         )
     });
     let project = &workspace.project;
     if next || previous {
-        let mut order: Vec<&Event> = project.events().iter().collect();
-        order.sort_by(|a, b| a.time().seconds_since(b.time()).total_cmp(&0.0));
-        if let Some(i) = order.iter().position(|e| e.id == current) {
-            let j = if next { i + 1 } else { i.wrapping_sub(1) };
-            if let Some(e) = order.get(j) {
-                let id = e.id;
-                open_event(view, tracks, project, id, width);
-            }
+        let order = review_order(project, queue);
+        let target = match order.iter().position(|id| *id == current) {
+            Some(i) => order.get(if next { i + 1 } else { i.wrapping_sub(1) }),
+            // Left the queue (accepted or rejected): continue from its head.
+            None => order.first(),
+        };
+        if let Some(&id) = target {
+            open_event(view, tracks, project, id, width);
         }
     }
-    for (pressed, status, verb) in [(accept, EventStatus::Reviewed, "Accept"), (reject, EventStatus::Rejected, "Reject")] {
-        if pressed && let Some(change) = status_change(&workspace.project, current, status) {
-            workspace.execute_or_report(format!("{verb} event"), vec![change]);
-        }
+    if accept && let Some(change) = accept_change(&workspace.project, current) {
+        workspace.execute_or_report("Accept event", vec![change]);
+    }
+    if reject && let Some(change) = status_change(&workspace.project, current, EventStatus::Rejected) {
+        workspace.execute_or_report("Reject event", vec![change]);
+    }
+    if let Some(n) = digit
+        && let Some(label) = workspace.project.taxonomy().ordered().get(n).map(|l| l.id.clone())
+        && let Some(change) = label_change(&workspace.project, current, Some(label))
+    {
+        workspace.execute_or_report("Label event", vec![change]);
     }
     if close {
         view.event = None;
@@ -686,18 +714,22 @@ fn catalogue_window(
                         ui.selectable_value(&mut windows.filter, Some(status), status.label());
                     }
                 });
+            ui.toggle_value(&mut windows.queue, "Queue").on_hover_text("Automatic events, most uncertain first; ] / [ follow it");
             let counts = EventStatus::ALL.map(|s| project.events().iter().filter(|e| e.status == s).count());
             ui.weak(format!("{} automatic · {} reviewed · {} rejected", counts[0], counts[1], counts[2]));
         });
-        let mut events: Vec<&Event> = project.events().iter().filter(|e| windows.filter.is_none_or(|s| e.status == s)).collect();
-        events.sort_by(|a, b| a.time().seconds_since(b.time()).total_cmp(&0.0));
+        let events: Vec<&Event> = review_order(project, windows.queue)
+            .into_iter()
+            .filter_map(|id| project.event(id))
+            .filter(|e| windows.queue || windows.filter.is_none_or(|s| e.status == s))
+            .collect();
         if events.is_empty() {
             ui.label("No events. Use Events ▸ Detect…, or ⌘/Ctrl+drag across the tracks.");
         }
         let truth = &workspace.truth_events;
         egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-            egui::Grid::new("catalogue").striped(true).num_columns(if truth.is_empty() { 8 } else { 9 }).show(ui, |ui| {
-                for heading in ["", "Time", "Duration", "Members", "Phenomenologies", "Origin", "Status", ""] {
+            egui::Grid::new("catalogue").striped(true).num_columns(if truth.is_empty() { 10 } else { 11 }).show(ui, |ui| {
+                for heading in ["", "Time", "Duration", "Members", "Phenomenologies", "Origin", "Predicted", "Label", "Status", ""] {
                     ui.strong(heading);
                 }
                 if !truth.is_empty() {
@@ -742,17 +774,34 @@ fn catalogue_window(
                         Some(o) => ui.monospace(format!("{:.4}°, {:.4}°, {:.1} km", o.latitude, o.longitude, o.depth_m / 1e3)),
                         None => ui.weak("—"),
                     };
+                    match event.consensus().first() {
+                        Some((label, p)) => {
+                            let name = project.taxonomy().get(label).map_or(label.as_str(), |l| l.name.as_str());
+                            ui.label(format!("{name} {:.0}%", p * 100.0))
+                                .on_hover_text(format!("uncertainty {:.2} over {} model(s)", event.uncertainty(), event.predictions.len()))
+                        }
+                        None => ui.weak("—"),
+                    };
+                    if let Some(label) = label_picker(ui, ("catalogue_label", event.id), project, event.label.as_ref())
+                        && let Some(change) = label_change(project, event.id, label)
+                    {
+                        changes = Some(("Label event".to_string(), vec![change]));
+                    }
                     ui.colored_label(status_color(event.status), event.status.label());
                     ui.horizontal(|ui| {
                         if ui.small_button("Review").clicked() {
                             review = Some(event.id);
                         }
-                        for (status, icon, tip) in [(EventStatus::Reviewed, "✔", "Accept (A)"), (EventStatus::Rejected, "✘", "Reject (R)")] {
-                            if ui.add_enabled(event.status != status, egui::Button::new(icon).small()).on_hover_text(tip).clicked()
-                                && let Some(change) = status_change(project, event.id, status)
-                            {
-                                changes = Some((format!("{} event", if status == EventStatus::Rejected { "Reject" } else { "Accept" }), vec![change]));
-                            }
+                        let accept = accept_change(project, event.id);
+                        if ui.add_enabled(accept.is_some(), egui::Button::new("✔").small()).on_hover_text("Accept, taking the predicted label when unlabelled (A)").clicked()
+                            && let Some(change) = accept
+                        {
+                            changes = Some(("Accept event".to_string(), vec![change]));
+                        }
+                        if ui.add_enabled(event.status != EventStatus::Rejected, egui::Button::new("✘").small()).on_hover_text("Reject as noise (R)").clicked()
+                            && let Some(change) = status_change(project, event.id, EventStatus::Rejected)
+                        {
+                            changes = Some(("Reject event".to_string(), vec![change]));
                         }
                         if ui.small_button("🗑").on_hover_text("Delete the event and its picks").clicked() {
                             changes = Some(("Delete event".to_string(), vec![Change::RemoveEvent { event: event.id }]));
@@ -760,7 +809,10 @@ fn catalogue_window(
                     });
                     if !truth.is_empty() {
                         match nearest_truth(event, truth) {
-                            Some((distance, dt)) => ui.monospace(format!("{:.0} m, {dt:+.3} s", distance)),
+                            Some((distance, dt, i)) => {
+                                let class = workspace.truth_labels.get(i).map_or(String::new(), |l| format!(", {l}"));
+                                ui.monospace(format!("{:.0} m, {dt:+.3} s{class}", distance))
+                            }
                             None => ui.weak("—"),
                         };
                     }
@@ -779,7 +831,7 @@ fn catalogue_window(
             if ui.add_enabled(view.event.is_some(), egui::Button::new("Close review")).clicked() {
                 view.event = None;
             }
-            ui.weak("While reviewing: ] / [ next and previous, A accept, R reject, Esc close.");
+            ui.weak("While reviewing: ] / [ next and previous, A accept, R reject, 1–9 label, Esc close.");
         });
     });
     if let Some((label, changes)) = changes
@@ -793,12 +845,13 @@ fn catalogue_window(
     windows.catalogue_open = open;
 }
 
-/// Distance and origin-time error to the nearest known event, for located events.
-fn nearest_truth(event: &Event, truth: &[(squiggle_core::locate::Source, Timestamp)]) -> Option<(f64, f64)> {
+/// Distance and origin-time error to the nearest known event, and its index, for located events.
+fn nearest_truth(event: &Event, truth: &[(squiggle_core::locate::Source, Timestamp)]) -> Option<(f64, f64, usize)> {
     let origin = event.origin.as_ref()?;
     truth
         .iter()
-        .map(|(s, t)| (surface_distance(origin.latitude, origin.longitude, s.latitude, s.longitude), origin.time.seconds_since(*t)))
+        .enumerate()
+        .map(|(i, (s, t))| (surface_distance(origin.latitude, origin.longitude, s.latitude, s.longitude), origin.time.seconds_since(*t), i))
         .min_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
 }
 
@@ -844,7 +897,7 @@ mod tests {
         let mut false_events = 0;
         for event in events {
             match nearest_truth(event, truth) {
-                Some((distance, dt)) if distance < 200.0 && dt.abs() < 0.05 => {
+                Some((distance, dt, _)) if distance < 200.0 && dt.abs() < 0.05 => {
                     let i = truth.iter().position(|(_, t)| event.origin.as_ref().unwrap().time.seconds_since(*t).abs() < 0.05).unwrap();
                     found[i] = true;
                     assert_eq!(event.members.len(), 8);
