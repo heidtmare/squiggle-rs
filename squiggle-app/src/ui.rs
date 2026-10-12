@@ -23,6 +23,8 @@ use crate::classify_ui::{self, ClassifyWindows};
 use crate::events_ui::{self, EventWindows};
 use crate::locate_ui::{self, LocateWindows};
 use crate::models_ui::{self, ModelRegistry, ModelWindows};
+use crate::scatter_ui::{self, ScatterWindows};
+use crate::templates_ui::{self, TemplateWindows};
 use crate::process_ui::{self, ProcessWindows};
 use crate::project_ui::{self, ProjectAccess, ProjectWindows};
 use crate::workspace::{SyntheticEvent, WorkspaceRequest};
@@ -50,6 +52,8 @@ impl Plugin for UiPlugin {
             .init_resource::<ClassifyWindows>()
             .init_resource::<ModelWindows>()
             .init_resource::<ModelRegistry>()
+            .init_resource::<TemplateWindows>()
+            .init_resource::<ScatterWindows>()
             .add_systems(Startup, setup)
             .add_systems(
                 EguiPrimaryContextPass,
@@ -61,6 +65,8 @@ impl Plugin for UiPlugin {
                     locate_ui::windows,
                     events_ui::windows,
                     models_ui::windows,
+                    templates_ui::windows,
+                    scatter_ui::windows,
                     classify_ui::windows,
                 )
                     .chain(),
@@ -90,6 +96,8 @@ pub struct TrackAccess<'w, 's> {
     events: ResMut<'w, EventWindows>,
     classify: ResMut<'w, ClassifyWindows>,
     models: ResMut<'w, ModelWindows>,
+    templates: ResMut<'w, TemplateWindows>,
+    scatter: ResMut<'w, ScatterWindows>,
 }
 
 /// Which parts of the chrome are open.
@@ -329,6 +337,8 @@ fn menu_bar(
             ui.separator();
             classify_ui::classify_menu(ui, &mut tracks.classify);
             models_ui::models_menu(ui, &mut tracks.models);
+            templates_ui::templates_menu(ui, &mut tracks.templates);
+            scatter_ui::scatter_menu(ui, &mut tracks.scatter);
             if tracks.events.detect_open || tracks.events.catalogue_open || tracks.classify.features_open {
                 *tracks.mode = PlotMode::Tracks;
             }
@@ -376,6 +386,14 @@ fn menu_bar(
                 .clicked()
             {
                 project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Catalogue));
+                ui.close();
+            }
+            if ui
+                .button("Synthetic event families")
+                .on_hover_text("A new project: 16 minutes of repeats from two quarries and two earthquake swarms, one weak repeat in each, for clustering, templates and the matched filter")
+                .clicked()
+            {
+                project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Families));
                 ui.close();
             }
             ui.separator();

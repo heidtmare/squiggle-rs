@@ -1,18 +1,19 @@
 //! Model packages: a directory holding `spec.toml` (inputs, labels,
 //! training provenance and scores) and one weights file, checksummed in the
-//! spec: `model.json` (classical: preprocessing and weights),
+//! spec: `model.json` (classical: preprocessing and weights; cluster: PCA and core points),
 //! `model.safetensors` (deep) or `model.onnx` (imported, `onnx` feature).
 
 use std::path::Path;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use squiggle_core::features::{FEATURE_SET, FeatureSettings, event_index};
+use squiggle_core::features::{COMPATIBLE_FEATURE_SETS, FEATURE_SET, FeatureSettings, event_index};
 use squiggle_core::windows::{WINDOW_SET, WindowSpec, Windows};
 use squiggle_core::{LabelId, Prediction};
 
 use crate::Trained;
 use crate::classical::{Kind, Params};
+use crate::cluster::Embedding;
 use crate::deep::{Architecture, Branch, DeepModel, Fusion};
 use crate::metrics::Scores;
 
@@ -27,6 +28,7 @@ pub const WINDOWS: &str = "windows";
 /// Model kinds besides the classical ones.
 pub const CNN: &str = "cnn";
 pub const ONNX: &str = "onnx";
+pub const CLUSTER: &str = "cluster";
 
 /// `heidtmare.squiggle.model/<name>@<version>`.
 pub fn model_id(name: &str, version: u32) -> String {
@@ -37,7 +39,7 @@ pub fn model_id(name: &str, version: u32) -> String {
 pub struct Spec {
     pub format: String,
     pub id: String,
-    /// A classical kind (`logistic`, `svm`, `knn`, `tree`, `forest`), `cnn` or `onnx`.
+    /// A classical kind (`logistic`, `svm`, `knn`, `tree`, `forest`), `cnn`, `onnx` or `cluster`.
     pub kind: String,
     pub created: String,
     /// `squiggle-models` version that wrote the package.
@@ -45,6 +47,9 @@ pub struct Spec {
     pub input: Input,
     pub output: Output,
     pub params: Params,
+    /// `cluster`: the parameters used (eps and components as fitted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<crate::cluster::ClusterParams>,
     pub training: Training,
     pub weights: Weights,
 }
@@ -75,8 +80,19 @@ pub struct Output {
     pub taxonomy_version: u32,
     /// `leaf` (the analyst's label) or `top` (its root ancestor).
     pub level: String,
-    /// In model output order; may include the noise class.
+    /// In model output order; may include the noise class. Empty for `cluster`.
     pub labels: Vec<String>,
+    /// `cluster`: each cluster's training events by class.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clusters: Vec<ClusterSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ClusterSummary {
+    pub cluster: usize,
+    pub events: usize,
+    /// Labelled training events, most first.
+    pub classes: Vec<ClassCount>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -132,6 +148,10 @@ pub enum Backend {
         columns: Vec<usize>,
     },
     Deep(Box<DeepModel>),
+    Cluster {
+        embedding: Embedding,
+        columns: Vec<usize>,
+    },
     #[cfg(feature = "onnx")]
     Onnx(crate::onnx::OnnxModel),
 }
@@ -159,6 +179,12 @@ impl Package {
         Self::assemble(spec, WEIGHTS_FILE, weights)
     }
 
+    /// An embedding; fills the spec's weights entry.
+    pub fn cluster(spec: Spec, embedding: &Embedding) -> Result<Self, String> {
+        let weights = serde_json::to_vec(embedding).map_err(|e| e.to_string())?;
+        Self::assemble(spec, WEIGHTS_FILE, weights)
+    }
+
     /// A deep model; fills the spec's weights entry.
     pub fn deep(spec: Spec, model: &DeepModel) -> Result<Self, String> {
         Self::assemble(spec, DEEP_WEIGHTS_FILE, model.to_bytes()?)
@@ -180,7 +206,7 @@ impl Package {
         if blake3::hash(weights).to_hex().as_str() != spec.weights.blake3 {
             return Err(format!("{} does not match its checksum", spec.weights.file));
         }
-        if spec.input.feature_set != FEATURE_SET {
+        if !COMPATIBLE_FEATURE_SETS.contains(&spec.input.feature_set.as_str()) {
             return Err(format!("feature set {} is not {FEATURE_SET}", spec.input.feature_set));
         }
         let columns = || {
@@ -198,6 +224,14 @@ impl Package {
                     return Err("weights and spec disagree on the feature count".to_string());
                 }
                 Backend::Classical { trained, columns }
+            }
+            (CLUSTER, EVENT_FEATURES) => {
+                let embedding: Embedding = serde_json::from_slice(weights).map_err(|e| format!("{}: {e}", spec.weights.file))?;
+                let columns = columns()?;
+                if embedding.preprocess.mean.len() != columns.len() {
+                    return Err("weights and spec disagree on the feature count".to_string());
+                }
+                Backend::Cluster { embedding, columns }
             }
             (CNN, WINDOWS) => {
                 if spec.input.window_set != WINDOW_SET {
@@ -246,17 +280,32 @@ impl Package {
     /// The model's columns from event features in `squiggle_core::features::EVENT_FEATURES` order.
     pub fn row(&self, event: &[f64]) -> Vec<f64> {
         match &self.backend {
-            Backend::Classical { columns, .. } => columns.iter().map(|&c| event.get(c).copied().unwrap_or(f64::NAN)).collect(),
+            Backend::Classical { columns, .. } | Backend::Cluster { columns, .. } => {
+                columns.iter().map(|&c| event.get(c).copied().unwrap_or(f64::NAN)).collect()
+            }
             #[cfg(feature = "onnx")]
             Backend::Onnx(model) => model.row(event),
             Backend::Deep(_) => Vec::new(),
         }
     }
 
+    pub fn is_classifier(&self) -> bool {
+        !matches!(self.backend, Backend::Cluster { .. })
+    }
+
+    /// PCA coordinates and cluster of an event (`cluster` models only).
+    pub fn embed(&self, features: &[f64]) -> Option<(Vec<f64>, Option<usize>)> {
+        let Backend::Cluster { embedding, .. } = &self.backend else { return None };
+        let point = embedding.embed(&self.row(features));
+        let cluster = embedding.assign(&point);
+        Some((point, cluster))
+    }
+
     /// Probabilities in label order, and each present fusion part's; `None`
-    /// when a deep model lacks a required (or any) phenomenology.
+    /// when a deep model lacks a required (or any) phenomenology, and for embeddings.
     pub fn probabilities(&self, inputs: Inputs) -> Option<Probabilities> {
         match &self.backend {
+            Backend::Cluster { .. } => None,
             Backend::Classical { trained, .. } => Some((trained.predict(&self.row(inputs.features)), Vec::new())),
             Backend::Deep(model) => {
                 let (p, parts) = model.predict(inputs.windows)?;
@@ -331,8 +380,9 @@ mod tests {
                 settings: FeatureSettings::default(),
                 branches: vec![],
             },
-            output: Output { taxonomy_version: 3, level: "leaf".into(), labels: vec!["earthquake".into(), "explosion".into()] },
+            output: Output { taxonomy_version: 3, level: "leaf".into(), labels: vec!["earthquake".into(), "explosion".into()], clusters: vec![] },
             params: Params::default(),
+            cluster: None,
             training: Training {
                 project: "p".into(),
                 dataset: "d".into(),

@@ -54,7 +54,7 @@ impl Default for DemoOptions {
 }
 
 pub const USAGE: &str = "\
-Usage: squiggle-app [--project FILE | --synthetic | --located | --swarm | --mixed | --catalogue] [--squiggles N] [--samples N]
+Usage: squiggle-app [--project FILE | --synthetic | --located | --swarm | --mixed | --catalogue | --families] [--squiggles N] [--samples N]
                     [--demo SCENE] [--screenshot FILE] [WAVEFORM...]
 
   WAVEFORM...        import these files at startup (miniSEED, SAC, SigMF,
@@ -70,6 +70,8 @@ Usage: squiggle-app [--project FILE | --synthetic | --located | --swarm | --mixe
                      (classification demo)
   --catalogue        start with 27 minutes of 40 varied synthetic earthquakes and
                      explosions on the same sensors (training data for models)
+  --families         start with 16 minutes of repeats from four source families,
+                     one weak repeat each (clustering and template demo)
   --squiggles N      put N squiggles on the plot at startup (default 0)
   --samples N        samples per generated squiggle (default 1000)
   --demo SCENE       open a transform demo: fourier or wavelet
@@ -116,6 +118,7 @@ impl DemoOptions {
                 "--swarm" => options.synthetic = Some(SyntheticEvent::Swarm),
                 "--mixed" => options.synthetic = Some(SyntheticEvent::Mixed),
                 "--catalogue" => options.synthetic = Some(SyntheticEvent::Catalogue),
+                "--families" => options.synthetic = Some(SyntheticEvent::Families),
                 "--help" | "-h" => return Err(USAGE.to_string()),
                 other if other.starts_with('-') => {
                     return Err(format!("unrecognised argument: {other}\n\n{USAGE}"));
@@ -256,6 +259,7 @@ mod tests {
         assert_eq!(parse(&["--swarm"]).unwrap().synthetic, Some(SyntheticEvent::Swarm));
         assert_eq!(parse(&["--mixed"]).unwrap().synthetic, Some(SyntheticEvent::Mixed));
         assert_eq!(parse(&["--catalogue"]).unwrap().synthetic, Some(SyntheticEvent::Catalogue));
+        assert_eq!(parse(&["--families"]).unwrap().synthetic, Some(SyntheticEvent::Families));
     }
 
     #[test]

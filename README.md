@@ -44,6 +44,12 @@ them through Fourier and wavelet transforms without leaving the plot.
   can be packaged too. The app imports packages and runs inference only,
   recording each model's prediction on every event and combining them in a
   weighted ensemble.
+- **Similarity and clusters.** A template library curated by analysts:
+  events match templates by network cross-correlation, which votes their
+  labels, and a matched filter finds weak repeats. An offline PCA and DBSCAN
+  embedding, imported like a model, plots events in a scatter view where a
+  lasso labels a cluster in one step. Analyst agreement is tracked per model
+  version.
 - **Spectrogram strips** per row, two-sided for I/Q.
 - **Independent axis zoom.** Zoom x and y together or separately, anchored on
   the point under the cursor — waveform axes rarely share a unit.
@@ -80,6 +86,7 @@ already compiles dependencies with optimizations in dev profiles.
 | `--swarm` | Start with two minutes of synthetic seismic data holding six events and glitches (see [Events](#events)) |
 | `--mixed` | Start with seven minutes of synthetic earthquakes and explosions on seismic and infrasound sensors (see [Classification](#classification)) |
 | `--catalogue` | Start with 27 minutes of 40 varied synthetic earthquakes and explosions on the same sensors, for training (see [Models](#models)) |
+| `--families` | Start with 16 minutes of repeats from two quarries and two earthquake swarms, one weak repeat each (see [Templates and clusters](#templates-and-clusters)) |
 | `WAVEFORM...` | Import these files (any format below) |
 | `--squiggles N` | Start with `N` demo squiggles |
 | `--samples N` | Samples per demo squiggle |
@@ -342,9 +349,18 @@ returns to the global offsets, picks and origin used outside events.
    trace, the onset nearest its predicted arrival if within the outlier
    limit. The rest cluster among themselves.
 
+**Matched filter** (on when any sensor has library templates): each track is
+also correlated, streamed, with its own sensor's templates (box-averaged to
+near the template rate, the first 6 s of each); a normalised correlation over
+0.5 opens a trigger whose onset is the best alignment's, and sidelobes within
+half a template merge. A matched onset within 0.5 s of a detector onset is
+dropped; detector onsets within the template span after one are its later
+phases and are dropped.
+
 Results list each candidate; **Apply** adds the events with their picks and
 origins as one undoable command, first removing automatic events if
-**Replace automatic events** is on.
+**Replace automatic events** is on. A candidate whose arrivals lie mostly on
+a kept event's members, within its window, is that event and is skipped.
 
 **Events ▸ Catalogue…** lists events by time with duration, members,
 phenomenologies, origin, predicted class, label and status (filterable).
@@ -363,7 +379,7 @@ locations fall within 25 m and 8 ms of truth.
 
 ## Classification
 
-**Features** (`heidtmare.squiggle.features/1`, computed by `squiggle-core` so
+**Features** (`heidtmare.squiggle.features/2`, computed by `squiggle-core` so
 a trainer computes the same) use each member's plotted series over the event
 window, from its first pick:
 
@@ -371,9 +387,10 @@ window, from its first pick:
   zero-crossing rate, kurtosis; dominant frequency, centroid, bandwidth,
   85 % roll-off, flatness, log₁₀ high/low band energy; Db4 wavelet energy
   share for six levels.
-- *Event:* members, sensors, phenomenologies, depth and residual RMS, arrival
-  spread, apparent velocity and back-azimuth (plane wave over the dominant
-  phenomenology's picks), amplitude spread.
+- *Event:* members, sensors, phenomenologies, depth, latitude, longitude and
+  residual RMS, arrival spread, apparent velocity and back-azimuth (plane
+  wave over the dominant phenomenology's picks), amplitude spread. Set /2
+  adds latitude and longitude to /1; packages and datasets of /1 still load.
 - *Discriminants* (seismic-like traces: phases named P and S): median log₁₀
   P/S peak ratio (windows from picks, else predicted from the origin), median
   high/low spectral ratio, mean first-motion sign; and the SNR of air
@@ -492,6 +509,58 @@ To try it: `--catalogue` (40 varied events), Detect, Classify, accept all
 `squiggle-train` (`--model forest`, or `--model cnn`) on the folder; then
 open `--mixed`, Detect, Models ▸ Import package, and Classify.
 
+**Analyst agreement by model version** (in Models) lists every model with a
+recorded prediction on a reviewed or rejected event, the rules and templates
+included, by name and version: agreement overall (confusion on hover), over
+the latest 20 events, and its change from the previous version.
+
+## Templates and clusters
+
+**Templates** (`heidtmare.squiggle.model/templates@1`). In Features, name the
+reviewed event and **Save as template**: each member's window from its onset
+(the deep-model windows: seismic 40 Hz × 512 from 1 s before) is stored per
+sensor in the project, labelled as the event. **Events ▸ Templates…**
+renames, relabels and removes them and opens the source event. Classify
+matches every event against the library: on each sensor an event shares
+with a template, the best normalised correlation within ±1 s of its onset;
+their mean (the network correlation, over at least two sensors) is the
+match. The best match of each label, through a softmax (temperature 0.05),
+is the templates' prediction when one reaches 0.5; it joins the ensemble
+with weight 1 and can be left out. Features lists the top matches. Detect's
+matched filter uses the same templates.
+
+**Clusters** are trained offline:
+
+```sh
+cargo run -p squiggle-train --release -- cluster <dataset-dir> --out <package-dir> \
+    [--features a,b] [--components n] [--eps x] [--min-points n] [--predictions coords.csv]
+```
+
+Every event in the dataset (export with **Include unlabelled** for an
+unsupervised run) is standardized (median fill), projected on the principal
+components covering 90 % of the variance (`--components`), and clustered by
+DBSCAN (`--eps`: three times the median distance to the
+`min-points − 1`-th neighbour by default). The package (`kind = "cluster"`)
+keeps the projection and the core points; each cluster's training classes
+are in the spec, and with labels the CLI prints the adjusted Rand index.
+Imported in Models it is not a classifier: **Events ▸ Scatter…** plots its
+coordinates (or any two event features), coloured by analyst label,
+consensus, cluster or status. New events take the cluster of the nearest
+core point within eps. Drag a lasso or click (Shift adds), **Select
+cluster**, then label, accept or reject the selection as one undoable
+command; double-click reviews an event.
+
+`--families` (or **Demo ▸ Synthetic event families**) writes the mixed
+scene's sensors recording six repeats each from two quarries and two
+earthquake swarms (within 100 m, amplitude ×0.7–1.4), each family with one
+weak repeat (quarries ×0.04, swarms ×0.015), and adds a subtype label per
+family. STA/LTA finds every strong repeat and neither weak swarm repeat.
+Save one template per family; Detect again and the matched filter adds the
+weak swarm repeats, located within 5 ms RMS; Classify votes every repeat's
+family from its templates (one weak quarry abstains). Label the events,
+export, and `squiggle-train cluster` finds the four families (adjusted Rand
+index 0.89, the two weak quarry repeats unclustered).
+
 ## Transforms
 
 The **Transform** menu turns each selected squiggle into new ones, added to
@@ -537,7 +606,7 @@ cargo run -p squiggle-app --release -- --demo fourier --screenshot fourier.png
 ```
 squiggle-core/   model, project op log, time, samples, LOD, transforms, DSP; no dependencies (optional serde)
 squiggle-io/     readers (miniSEED, SAC, SigMF, WAV, CSV, raw), sources, SQLite project store, Parquet datasets
-squiggle-models/ classical classifiers, burn CNNs and fusion, optional ONNX (tract), cross-validation, model packages
+squiggle-models/ classical classifiers, burn CNNs and fusion, optional ONNX (tract), PCA and DBSCAN, cross-validation, model packages
 squiggle-train/  offline training CLI: dataset in, model package out
 squiggle-app/    the Bevy application
   src/workspace.rs   open project, async file I/O
@@ -547,8 +616,10 @@ squiggle-app/    the Bevy application
   src/locate_ui.rs   pick and locate windows, alignment across phenomenologies
   src/events_ui.rs   detection, association, catalogue, event edits
   src/classify_ui.rs features, rules, labels, review queue, dataset export
-  src/models_ui.rs   model registry and manager
-  src/synthetic.rs   synthetic alignment, located, swarm and mixed scenes
+  src/models_ui.rs   model registry and manager, agreement by version
+  src/templates_ui.rs template library
+  src/scatter_ui.rs  feature and embedding scatter, lasso, bulk labels
+  src/synthetic.rs   synthetic alignment, located, swarm, mixed, catalogue and family scenes
   src/project_ui.rs  import, sensor and phenomenology windows
   assets/shaders/squiggle_line.wgsl   screen-space polyline expansion
   src/plot/      camera, input, meshing, overlay
@@ -650,12 +721,23 @@ disabled models skipped; an edited package refused) and the M8 self-check
 late-fusion waveform CNN and an early-fusion spectrogram CNN, get the
 trainer's probabilities exactly in the app, classify the held-out mixed scene
 with every sensor, without infrasound and without seismic; a zero-weight
-model leaves the ensemble alone).
+model leaves the ensemble alone) and the M9 self-check (the families scene:
+STA/LTA misses the weak swarm repeats, templates from one event per family
+and the matched filter find every repeat once, reviewed events are not
+detected again, templates vote every repeat's family, an offline cluster
+package recovers the families (adjusted Rand ≥ 0.8) and assigns events in
+the app as in the trainer, a cluster relabels in bulk and undoes, and
+agreement is tracked per model).
 `squiggle-models` tests each classifier on Gaussian blobs, seeded
 determinism, median fill and standardization, stratified folds, scores,
 package round trips with tampered weights and mismatched features refused,
 both fusions classifying two-branch data with either branch missing,
 required branches abstaining, safetensors round trips, spectrogram bins,
-and (`--features onnx`) an ONNX graph built in the test.
+and (`--features onnx`) an ONNX graph built in the test, the Jacobi
+eigensolver, and DBSCAN recovering blobs with an outlier and assigning new
+points. Core tests also cover template matching (a repeat picked 0.2 s late
+matches its template at its lag; too few sensors or noise do not vote), and
+the matched filter finding weak repeats at their onsets, chunked runs equal
+to whole ones.
 `squiggle-train` tests training every kind, CNNs on written windows, leaf
 and top levels, noise and feature selection on a written dataset.

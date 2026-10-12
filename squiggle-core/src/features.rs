@@ -16,7 +16,9 @@ use crate::transform::wavelet::{Wavelet, decompose};
 use crate::transform::{Complex, fft, ifft};
 
 /// Version of the feature definitions below; recorded with every export.
-pub const FEATURE_SET: &str = "heidtmare.squiggle.features/1";
+pub const FEATURE_SET: &str = "heidtmare.squiggle.features/2";
+/// Earlier sets whose features keep their names and meaning in this one.
+pub const COMPATIBLE_FEATURE_SETS: [&str; 2] = [FEATURE_SET, "heidtmare.squiggle.features/1"];
 
 const WAVELET_LEVELS: usize = 6;
 
@@ -43,7 +45,7 @@ pub const MEMBER_FEATURES: [&str; 20] = [
     "wavelet_6",
 ];
 
-pub const EVENT_FEATURES: [&str; 15] = [
+pub const EVENT_FEATURES: [&str; 17] = [
     "members",
     "sensors",
     "phenomenologies",
@@ -59,6 +61,8 @@ pub const EVENT_FEATURES: [&str; 15] = [
     "first_motion",
     "air_snr_db",
     "em_snr_db",
+    "latitude",
+    "longitude",
 ];
 
 /// Index of `name` in [`EVENT_FEATURES`].
@@ -432,6 +436,8 @@ fn event_features(traces: &[TraceData], event: &EventData, members: &[Vec<f64>],
     if let Some(origin) = event.origin {
         set(&mut out, "depth_m", origin.source.depth_m);
         set(&mut out, "rms_s", origin.rms_s);
+        set(&mut out, "latitude", origin.source.latitude);
+        set(&mut out, "longitude", origin.source.longitude);
     }
     let firsts: Vec<f64> = event.members.iter().filter_map(|&i| event.first_pick(i)).collect();
     if firsts.len() >= 2 {

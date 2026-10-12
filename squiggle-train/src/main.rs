@@ -1,4 +1,5 @@
 //! `squiggle-train <dataset> --out <package> [options]`, or
+//! `squiggle-train cluster <dataset> --out <package> …`, or
 //! `squiggle-train onnx <model.onnx> --out <package> …`: see `USAGE`.
 
 use std::path::PathBuf;
@@ -6,10 +7,12 @@ use std::process::ExitCode;
 
 use squiggle_models::Kind;
 use squiggle_models::deep::{Encoder, Fusion};
-use squiggle_train::{Dataset, Level, Method, Options, predictions, train};
+use squiggle_train::{ClusterOptions, Dataset, Level, Method, Options, predictions, train};
 
 const USAGE: &str = "\
 usage: squiggle-train <dataset-dir> --out <package-dir> [options]
+       squiggle-train cluster <dataset-dir> --out <package-dir> [--features <a,b,…>]
+                      [--components <n>] [--eps <x>] [--min-points <n>] [--name <name>] [--version <n>]
        squiggle-train onnx <model.onnx> --out <package-dir> --features <a,b,…> --labels <x,y,…>
                       [--name <name>] [--version <n>] [--taxonomy-version <n>]   (onnx feature)
 
@@ -30,7 +33,11 @@ usage: squiggle-train <dataset-dir> --out <package-dir> [options]
   --l2 <x> --iterations <n> --rate <x> --k <n> --max-depth <n> --min-leaf <n> --trees <n>
   --epochs <n> --batch <n> --learning-rate <x> --branch-dropout <x> --width <n> --hidden <n>
                         hyperparameters
-  --predictions <file>  also write each event's probabilities as CSV";
+  --predictions <file>  also write each event's probabilities (cluster: coordinates and cluster) as CSV
+
+cluster: PCA of the standardized event features of every event, labelled or
+not, then DBSCAN in the PCA space. --components 0 keeps 90 % of the variance;
+--eps 0 picks the radius from the data; --min-points defaults to 3.";
 
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
@@ -51,8 +58,10 @@ fn number<T: std::str::FromStr>(arg: &str, v: String) -> Result<T, String> {
 }
 
 fn run(args: Vec<String>) -> Result<(), String> {
-    if args.first().map(String::as_str) == Some("onnx") {
-        return onnx(args.into_iter().skip(1).collect());
+    match args.first().map(String::as_str) {
+        Some("onnx") => return onnx(args.into_iter().skip(1).collect()),
+        Some("cluster") => return cluster(args.into_iter().skip(1).collect()),
+        _ => {}
     }
     let mut options = Options::default();
     let (mut encoder, mut fusion, mut cnn) = (Encoder::Waveform, Fusion::Late, false);
@@ -158,6 +167,67 @@ fn run(args: Vec<String>) -> Result<(), String> {
         }
         std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
         println!("predictions → {}", path.display());
+    }
+    Ok(())
+}
+
+fn cluster(args: Vec<String>) -> Result<(), String> {
+    let mut options = ClusterOptions { version: 1, ..Default::default() };
+    let (mut dataset, mut out, mut csv) = (None::<PathBuf>, None::<PathBuf>, None::<PathBuf>);
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
+        match arg.as_str() {
+            "--out" => out = Some(value()?.into()),
+            "--features" => options.features = Some(list(value()?)),
+            "--components" => options.params.components = number(&arg, value()?)?,
+            "--eps" => options.params.eps = number(&arg, value()?)?,
+            "--min-points" => options.params.min_points = number(&arg, value()?)?,
+            "--name" => options.name = Some(value()?),
+            "--version" => options.version = number(&arg, value()?)?,
+            "--predictions" => csv = Some(value()?.into()),
+            _ if arg.starts_with('-') => return Err(format!("unknown option {arg}\n{USAGE}")),
+            _ if dataset.is_none() => dataset = Some(arg.into()),
+            _ => return Err(format!("unexpected argument {arg}\n{USAGE}")),
+        }
+    }
+    let (Some(dir), Some(out)) = (dataset, out) else {
+        return Err(USAGE.to_string());
+    };
+    let dataset = Dataset::load(&dir)?;
+    let (package, assigned) = squiggle_train::cluster(&dataset, &options)?;
+    package.save(&out)?;
+    let spec = &package.spec;
+    let fitted = spec.cluster.unwrap_or_default();
+    println!("{} → {}", spec.id, out.display());
+    println!("{} events, {} components, eps {:.3}, min points {}", spec.training.events, fitted.components, fitted.eps, fitted.min_points);
+    let noise = assigned.iter().filter(|a| a.is_none()).count();
+    println!("{} clusters, {noise} unclustered", spec.output.clusters.len());
+    for c in &spec.output.clusters {
+        let classes: Vec<String> = c.classes.iter().map(|k| format!("{} {}", k.events, k.label)).collect();
+        println!("  {:>3}: {:>4} events  {}", c.cluster, c.events, classes.join(", "));
+    }
+    let truth: Vec<Option<String>> = dataset.classes.clone();
+    if truth.iter().any(Option::is_some) {
+        let mut names: Vec<&String> = truth.iter().flatten().collect();
+        names.sort();
+        names.dedup();
+        let classes: Vec<Option<usize>> = truth.iter().map(|c| c.as_ref().and_then(|c| names.iter().position(|n| *n == c))).collect();
+        println!("adjusted Rand index against the classes: {:.3}", squiggle_train::adjusted_rand(&assigned, &classes));
+    }
+    if let Some(path) = csv {
+        let mut text = String::from("event,cluster");
+        for k in 0..fitted.components {
+            text.push_str(&format!(",pc{}", k + 1));
+        }
+        text.push('\n');
+        for (i, (event, row)) in dataset.events.iter().zip(&dataset.rows).enumerate() {
+            let (point, _) = package.embed(row).expect("a cluster package");
+            let cells: Vec<String> = point.iter().map(|v| v.to_string()).collect();
+            text.push_str(&format!("{event},{},{}\n", assigned[i].map_or(String::new(), |k| k.to_string()), cells.join(",")));
+        }
+        std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+        println!("coordinates → {}", path.display());
     }
     Ok(())
 }
