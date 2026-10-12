@@ -41,6 +41,10 @@ pub struct DemoOptions {
     pub live: Option<String>,
     /// Start with a live replay of the event families.
     pub live_demo: bool,
+    /// Who edits; else `$SQUIGGLE_ANALYST`, else the OS user.
+    pub analyst: Option<String>,
+    /// Sync server (`host:port`) the Shared Project window starts with.
+    pub server: Option<String>,
 }
 
 impl Default for DemoOptions {
@@ -55,13 +59,16 @@ impl Default for DemoOptions {
             synthetic: None,
             live: None,
             live_demo: false,
+            analyst: None,
+            server: None,
         }
     }
 }
 
 pub const USAGE: &str = "\
 Usage: squiggle-app [--project FILE | --synthetic | --located | --swarm | --mixed | --catalogue | --families]
-                    [--live HOST:PORT | --live-demo] [--squiggles N] [--samples N]
+                    [--live HOST:PORT | --live-demo] [--analyst NAME] [--server HOST:PORT]
+                    [--squiggles N] [--samples N]
                     [--demo SCENE] [--screenshot FILE] [WAVEFORM...]
 
   WAVEFORM...        import these files at startup (miniSEED, SAC, SigMF,
@@ -81,6 +88,8 @@ Usage: squiggle-app [--project FILE | --synthetic | --located | --swarm | --mixe
                      one weak repeat each (clustering and template demo)
   --live HOST:PORT   connect to a live feed (heidtmare.squiggle.stream/1)
   --live-demo        start with the event families replayed live at ×10
+  --analyst NAME     record edits as NAME (default $SQUIGGLE_ANALYST, else the OS user)
+  --server HOST:PORT sync server for sharing projects (heidtmare.squiggle.sync/1)
   --squiggles N      put N squiggles on the plot at startup (default 0)
   --samples N        samples per generated squiggle (default 1000)
   --demo SCENE       open a transform demo: fourier or wavelet
@@ -130,6 +139,8 @@ impl DemoOptions {
                 "--families" => options.synthetic = Some(SyntheticEvent::Families),
                 "--live" => options.live = Some(args.next().ok_or_else(|| format!("{argument} needs host:port"))?),
                 "--live-demo" => options.live_demo = true,
+                "--analyst" => options.analyst = Some(args.next().filter(|a| !a.trim().is_empty()).ok_or_else(|| format!("{argument} needs a name"))?),
+                "--server" => options.server = Some(args.next().ok_or_else(|| format!("{argument} needs host:port"))?),
                 "--help" | "-h" => return Err(USAGE.to_string()),
                 other if other.starts_with('-') => {
                     return Err(format!("unrecognised argument: {other}\n\n{USAGE}"));
@@ -274,6 +285,9 @@ mod tests {
         assert_eq!(parse(&["--live", "h:1"]).unwrap().live.as_deref(), Some("h:1"));
         assert!(parse(&["--live-demo"]).unwrap().live_demo);
         assert!(parse(&["--live"]).is_err());
+        assert_eq!(parse(&["--analyst", "bo", "--server", "h:2"]).unwrap().analyst.as_deref(), Some("bo"));
+        assert_eq!(parse(&["--server", "h:2"]).unwrap().server.as_deref(), Some("h:2"));
+        assert!(parse(&["--analyst"]).is_err());
     }
 
     #[test]

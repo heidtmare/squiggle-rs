@@ -85,6 +85,35 @@ impl SqliteStore {
     }
 }
 
+impl SqliteStore {
+    pub fn meta(&self, key: &str) -> Result<Option<String>, StoreError> {
+        Ok(self.connection.query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| row.get(0)).optional()?)
+    }
+
+    /// Sets or, with `None`, clears a metadata value.
+    pub fn set_meta(&mut self, key: &str, value: Option<&str>) -> Result<(), StoreError> {
+        match value {
+            Some(value) => self.connection.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)", params![key, value])?,
+            None => self.connection.execute("DELETE FROM meta WHERE key = ?1", [key])?,
+        };
+        Ok(())
+    }
+
+    /// Replaces the whole log atomically: a synced project adopting the shared order.
+    pub fn replace(&mut self, ops: &[Op]) -> Result<(), StoreError> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM ops", [])?;
+        {
+            let mut insert = transaction.prepare("INSERT INTO ops (id, op) VALUES (?1, ?2)")?;
+            for op in ops {
+                insert.execute(params![op.id.to_string(), serde_json::to_string(op)?])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+}
+
 impl ProjectStore for SqliteStore {
     fn append(&mut self, ops: &[Op]) -> Result<(), StoreError> {
         let transaction = self.connection.transaction()?;
@@ -132,6 +161,24 @@ mod tests {
 
         let loaded = store.load().unwrap();
         assert_eq!(Project::replay(&loaded).unwrap(), project);
+    }
+
+    #[test]
+    fn logs_can_be_replaced_and_meta_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.squiggle");
+        let analyst = Analyst("ana".to_string());
+        let (project, ops) = Project::create("p", &analyst);
+        let mut store = SqliteStore::create(&path).unwrap();
+        store.append(&ops).unwrap();
+        store.set_meta("remote", Some("x")).unwrap();
+        store.replace(&ops[..1]).unwrap();
+        assert_eq!(store.load().unwrap(), ops[..1]);
+        store.replace(&ops).unwrap();
+        assert_eq!(Project::replay(&store.load().unwrap()).unwrap(), project);
+        assert_eq!(store.meta("remote").unwrap().as_deref(), Some("x"));
+        store.set_meta("remote", None).unwrap();
+        assert_eq!(store.meta("remote").unwrap(), None);
     }
 
     #[test]

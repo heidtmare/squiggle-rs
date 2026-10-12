@@ -50,6 +50,11 @@ them through Fourier and wavelet transforms without leaving the plot.
   sliding window: each event is added once no later arrival could change it,
   giving exactly the events of the whole recording. `squiggle-stream`
   replays files as a feed.
+- **Shared projects.** `squiggle-server` holds shared projects and the files
+  behind them (`heidtmare.squiggle.sync/1`). Analysts work offline and sync
+  edits both ways; edits merge per field, the later one winning, except where
+  an analyst's judgement (a locked alignment, a manual pick, a reviewed event)
+  meets a concurrent edit, which is held as a conflict for a person to settle.
 - **Similarity and clusters.** A template library curated by analysts:
   events match templates by network cross-correlation, which votes their
   labels, and a matched filter finds weak repeats. An offline PCA and DBSCAN
@@ -95,6 +100,8 @@ already compiles dependencies with optimizations in dev profiles.
 | `--families` | Start with 16 minutes of repeats from two quarries and two earthquake swarms, one weak repeat each (see [Templates and clusters](#templates-and-clusters)) |
 | `--live HOST:PORT` | Connect to a live feed (see [Live feeds](#live-feeds)) |
 | `--live-demo` | Start with the event families replayed live at ×10 |
+| `--analyst NAME` | Record edits as `NAME` (default `$SQUIGGLE_ANALYST`, else the OS user) |
+| `--server HOST:PORT` | Open the Shared Project window on this sync server (see [Shared projects](#shared-projects)) |
 | `WAVEFORM...` | Import these files (any format below) |
 | `--squiggles N` | Start with `N` demo squiggles |
 | `--samples N` | Samples per demo squiggle |
@@ -169,7 +176,8 @@ change.
 | Add or edit phenomenologies | **Project ▸ Phenomenologies…** |
 
 Once saved, every edit is written immediately. Undo and redo append the
-inverse or repeated change to the log; the log is never rewritten.
+inverse or repeated change to the log; the log is rewritten only when a
+shared project adopts the server's order (see [Shared projects](#shared-projects)).
 Processing, offsets, picks, sensor locations, origins and events undo; imports
 and phenomenology assignments do not yet.
 
@@ -608,6 +616,41 @@ project, serves the families scene locally at ×10 and connects, assigning
 the suggested phenomenologies; events appear about 15 s (152 s of feed)
 after they occur.
 
+## Shared projects
+
+Run a server; it keeps each shared project's log in `<dir>/<id>.squiggle`
+and the files behind traces and models in `<dir>/blobs/<hash>/`:
+
+```sh
+cargo run -p squiggle-io --release --bin squiggle-server -- [--port 18100] [--dir squiggle-server]
+```
+
+**Project ▸ Shared project…** (the project must be saved):
+
+- **Share this project** uploads its log and every trace and model file.
+- **List shared projects ▸ Open…** saves a shared project to a new file and
+  opens it; files missing on this machine are fetched into
+  `<project>.files/<hash>/` and loaded from there.
+- **Sync** runs every 5 s (or **Sync now**): pending ops (made since the last
+  pull) are pushed with how much of the shared log they were made on; the
+  reply carries each op's outcome and the shared ops not yet seen, and the
+  local log becomes the shared log plus any edits made meanwhile. Undo
+  history is cleared when others' edits arrive. Works offline: edits wait.
+- **Merging** is per field (a sensor's clock, a trace's processing, an
+  event, a pick slot, …). An op that clashes with a concurrent op on the
+  same field: if the field holds an analyst's judgement before or after
+  (assigned phenomenology, locked alignment, manual pick or origin, reviewed,
+  rejected, labelled or manual event), it is a **conflict**; otherwise the
+  later edit (by time) wins and the older is dropped as superseded. An op
+  that no longer applies (its event was removed) is a conflict too.
+- **Conflicts** are kept in the project file and listed with both sides:
+  **Keep theirs** drops mine; **Apply mine** makes my edit again on top.
+- Every op carries its analyst (`--analyst`); the server refuses pushes of
+  ops by anyone but the connected analyst.
+
+To try it on one machine: start the server, run the app twice with
+`--analyst ana` and `--analyst bo`, share from one, open from the other.
+
 ## Transforms
 
 The **Transform** menu turns each selected squiggle into new ones, added to
@@ -651,9 +694,10 @@ cargo run -p squiggle-app --release -- --demo fourier --screenshot fourier.png
 ### Layout
 
 ```
-squiggle-core/   model, project op log, time, samples, LOD, transforms, DSP; no dependencies (optional serde)
-squiggle-io/     readers (miniSEED, SAC, SigMF, WAV, CSV, raw), sources, live TCP feeds and recording, SQLite project store, Parquet datasets
+squiggle-core/   model, project op log and its per-field merge, time, samples, LOD, transforms, DSP; no dependencies (optional serde)
+squiggle-io/     readers (miniSEED, SAC, SigMF, WAV, CSV, raw), sources, live TCP feeds and recording, SQLite project store, sync server and client, Parquet datasets
   src/bin/squiggle-stream.rs   replays files as a live feed
+  src/bin/squiggle-server.rs   shares projects and their files (sync server)
 squiggle-models/ classical classifiers, burn CNNs and fusion, optional ONNX (tract), PCA and DBSCAN, cross-validation, model packages
 squiggle-train/  offline training CLI: dataset in, model package out
 squiggle-app/    the Bevy application
@@ -669,6 +713,7 @@ squiggle-app/    the Bevy application
   src/scatter_ui.rs  feature and embedding scatter, lasso, bulk labels
   src/live.rs        streaming detection and sliding-window association
   src/live_ui.rs     live feed session: recording, checkpoints, follow, demo replay
+  src/sync_ui.rs     shared projects: share, open, sync, file transfer, conflicts
   src/synthetic.rs   synthetic alignment, located, swarm, mixed, catalogue and family scenes
   src/project_ui.rs  import, sensor and phenomenology windows
   assets/shaders/squiggle_line.wgsl   screen-space polyline expansion
@@ -757,7 +802,12 @@ source chunking, change detection, and Parquet tables with nulls and
 metadata, read back with their hashes checked, and safetensors windows,
 stream frames round-tripping real and I/Q channels, a replay over TCP,
 refused bad and truncated feeds, and recordings reloading to their
-checkpoint. `squiggle-app` tests the mesh
+checkpoint; two sync clients sharing a project over TCP (forged ops refused,
+a restarted server keeping it), blobs round-tripping and refused when their
+hash is wrong, and a stream recording sharing only its checkpointed bytes.
+Core sync tests merge different fields, keep the later edit of a plain field
+whichever arrives first, raise conflicts on reviewed events and on ops that
+no longer apply, and rebase pending ops. `squiggle-app` tests the mesh
 builder's topology, import validation, LOD bucketing, undo/redo through the
 log, the synthetic events, manual pick placement, moveout and pick alignment,
 argument parsing, event split, merge and edit rules, saving events, the M4
@@ -784,7 +834,12 @@ agreement is tracked per model) and the Phase 10 self-check (the swarm and
 the families, with templates and matched filters, fed in half-second chunks
 through streaming detection give exactly the events of detecting the whole
 files, each due event closing before the feed ends; a served replay is
-recorded, checkpointed and reloads sample for sample). Growing series match
+recorded, checkpointed and reloads sample for sample) and the Phase 11
+self-check (two analysts share a project through a server, the second on a
+"machine" without the trace file, which arrives through the blob store; both
+edit offline, sync, and end with identical logs and projects; the clashing
+review of the same event is held as a conflict, survives a reopen, and once
+settled syncs to both; edits made during a sync are kept). Growing series match
 ones built whole.
 `squiggle-models` tests each classifier on Gaussian blobs, seeded
 determinism, median fill and standardization, stratified folds, scores,

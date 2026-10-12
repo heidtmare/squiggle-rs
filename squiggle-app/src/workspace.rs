@@ -15,6 +15,8 @@ use squiggle_core::{
     Analyst, Change, Id, LabelId, Location, Op, PhenomenologyId, Project, RawLayout, Rgba, SampleBuf, Suggestion, Timestamp,
     Trace, TraceSamples, TraceSource,
 };
+use squiggle_core::sync::{Conflict, Outcome, rebase};
+use squiggle_io::sync::{Remote, Synced};
 use squiggle_io::{FileRead, PROJECT_EXTENSION, ProjectStore, ReadError, SqliteStore};
 
 use crate::plot::Plot;
@@ -52,6 +54,8 @@ pub enum WorkspaceRequest {
     ImportRaw(Vec<PathBuf>, RawLayout),
     /// Replaces the project with a synthetic event.
     Synthetic(SyntheticEvent),
+    /// Reloads these traces' samples (after a sync changed or added them).
+    Reload(Vec<Id>),
     /// Re-issues a request that was held back by the unsaved-project prompt.
     Discard(Box<WorkspaceRequest>),
 }
@@ -109,6 +113,10 @@ pub struct Workspace {
     /// Ops a fresh project starts with; more than this and an unsaved project has edits.
     created_ops: usize,
     store: Option<Mutex<SqliteStore>>,
+    /// The shared project this one syncs with.
+    remote: Option<Remote>,
+    /// Edits the server held back, awaiting the analyst.
+    pub conflicts: Vec<Conflict>,
     /// Bumped on every change the plot must reflect.
     revision: u64,
     undo: Vec<Command>,
@@ -141,6 +149,8 @@ impl Workspace {
             created_ops: log.len(),
             log,
             store: None,
+            remote: None,
+            conflicts: Vec::new(),
             revision: 1,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -254,15 +264,117 @@ impl Workspace {
         }
     }
 
-    fn save_as(&mut self, path: &Path) -> Result<(), String> {
+    pub(crate) fn save_as(&mut self, path: &Path) -> Result<(), String> {
         let mut store = SqliteStore::create(path).map_err(|e| e.to_string())?;
         store.append(&self.log).map_err(|e| e.to_string())?;
+        Remote::save(&mut store, self.remote.as_ref()).map_err(|e| e.to_string())?;
+        squiggle_io::sync::save_conflicts(&mut store, &self.conflicts).map_err(|e| e.to_string())?;
         self.store = Some(Mutex::new(store));
         self.path = Some(path.to_path_buf());
         Ok(())
     }
 
-    fn open(path: &Path, analyst: Analyst) -> Result<Self, String> {
+    pub fn log(&self) -> &[Op] {
+        &self.log
+    }
+
+    pub fn remote(&self) -> Option<&Remote> {
+        self.remote.as_ref()
+    }
+
+    /// Ops not yet in the shared log.
+    pub fn pending(&self) -> &[Op] {
+        self.remote.as_ref().map_or(&[], |r| &self.log[r.confirmed.min(self.log.len())..])
+    }
+
+    /// Where files shared by others are kept: beside the project file.
+    pub fn cache_dir(&self) -> Option<PathBuf> {
+        self.path.as_ref().map(|p| p.with_extension("files"))
+    }
+
+    fn with_store<T>(&self, f: impl FnOnce(&mut SqliteStore) -> Result<T, squiggle_io::sync::SyncError>) -> Result<Option<T>, String> {
+        match &self.store {
+            Some(store) => f(&mut store.lock().unwrap_or_else(|p| p.into_inner())).map(Some).map_err(|e| format!("Not saved: {e}")),
+            None => Ok(None),
+        }
+    }
+
+    /// Links the project to a shared one whose log is, so far, all of ours.
+    pub fn link(&mut self, remote: Remote) -> Result<(), String> {
+        self.with_store(|store| Remote::save(store, Some(&remote)))?;
+        self.remote = Some(remote);
+        self.revision += 1;
+        Ok(())
+    }
+
+    /// Stops syncing; the project keeps its log.
+    pub fn unlink(&mut self) -> Result<(), String> {
+        self.with_store(|store| Remote::save(store, None))?;
+        self.remote = None;
+        self.revision += 1;
+        Ok(())
+    }
+
+    pub fn save_conflicts(&mut self) -> Result<(), String> {
+        let conflicts = self.conflicts.clone();
+        self.with_store(|store| squiggle_io::sync::save_conflicts(store, &conflicts))?;
+        Ok(())
+    }
+
+    /// Adopts a sync reply to the first `sent` pending ops: the shared log
+    /// becomes ours, and ops made since are reapplied on top. Returns the
+    /// traces whose samples must be (re)loaded.
+    pub fn adopt(&mut self, sent: usize, synced: Synced) -> Result<Adopted, String> {
+        let Some(remote) = self.remote.clone() else { return Err("not a shared project".to_string()) };
+        let base = remote.confirmed.min(self.log.len());
+        let mut confirmed = self.log[..base].to_vec();
+        confirmed.extend(synced.ops.iter().cloned());
+        let later = self.log[(base + sent).min(self.log.len())..].to_vec();
+        let (project, kept, failed) = rebase(&confirmed, &later).map_err(|e| format!("The shared log does not replay: {e}"))?;
+
+        let mut adopted = Adopted::default();
+        let held = self.conflicts.len();
+        let sent_ids: HashSet<Id> = self.log[base..(base + sent).min(self.log.len())].iter().map(|op| op.id).collect();
+        adopted.remote_ops = synced.ops.iter().filter(|op| !sent_ids.contains(&op.id)).count();
+        for outcome in synced.outcomes {
+            match outcome {
+                Outcome::Accepted | Outcome::Duplicate => adopted.accepted += 1,
+                Outcome::Superseded { .. } => adopted.superseded += 1,
+                Outcome::Conflict(conflict) => self.conflicts.push(*conflict),
+            }
+        }
+        self.conflicts.extend(failed);
+        adopted.conflicts = self.conflicts.len() - held;
+        adopted.reload = project
+            .traces()
+            .iter()
+            .filter(|t| self.project.trace(t.id).is_none_or(|old| old.source != t.source) || matches!(self.samples.get(&t.id), Some(SampleState::Failed(_))))
+            .map(|t| t.id)
+            .collect();
+
+        let mut log = confirmed;
+        log.extend(kept);
+        let remote = Remote { confirmed: synced.head, ..remote };
+        let conflicts = self.conflicts.clone();
+        self.with_store(|store| {
+            store.replace(&log)?;
+            Remote::save(store, Some(&remote))?;
+            squiggle_io::sync::save_conflicts(store, &conflicts)
+        })?;
+        self.samples.retain(|id, _| project.trace(*id).is_some());
+        if adopted.remote_ops > 0 || adopted.superseded > 0 || adopted.conflicts > 0 {
+            // Inverses were taken against a state that has changed.
+            self.undo.clear();
+            self.redo.clear();
+        }
+        self.project = project;
+        self.log = log;
+        self.remote = Some(remote);
+        self.revision += 1;
+        Ok(adopted)
+    }
+
+    pub(crate) fn open(path: &Path, analyst: Analyst) -> Result<Self, String> {
         let store = SqliteStore::open(path).map_err(|e| e.to_string())?;
         let log = store.load().map_err(|e| e.to_string())?;
         let project = Project::replay(&log).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -280,6 +392,8 @@ impl Workspace {
             truth_families: Vec::new(),
             created_ops: log.len(),
             log,
+            remote: squiggle_io::sync::Remote::load(&store).map_err(|e| e.to_string())?,
+            conflicts: squiggle_io::sync::load_conflicts(&store).map_err(|e| e.to_string())?,
             store: Some(Mutex::new(store)),
             revision: 1,
             undo: Vec::new(),
@@ -394,6 +508,20 @@ impl Workspace {
         next.revision = self.revision + 1;
         *self = next;
     }
+}
+
+/// What a sync changed locally.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Adopted {
+    /// Our ops now in the shared log.
+    pub accepted: usize,
+    /// Our ops a later concurrent edit beat.
+    pub superseded: usize,
+    /// New conflicts awaiting the analyst.
+    pub conflicts: usize,
+    /// Others' ops pulled.
+    pub remote_ops: usize,
+    pub reload: Vec<Id>,
 }
 
 /// One channel awaiting the analyst's confirmation in the import dialog.
@@ -622,13 +750,19 @@ fn read_files(paths: Vec<PathBuf>, layout: Option<RawLayout>) -> Task<Vec<FileOu
     })
 }
 
-fn load_traces(workspace: &mut Workspace) -> Task<SampleLoad> {
-    let traces: Vec<squiggle_core::Trace> = workspace.project.traces().to_vec();
+/// Loads traces' samples (all when `only` is `None`), from their files or the shared-file cache.
+fn load_traces(workspace: &mut Workspace, only: Option<&[Id]>) -> Task<SampleLoad> {
+    let traces: Vec<squiggle_core::Trace> =
+        workspace.project.traces().iter().filter(|t| only.is_none_or(|ids| ids.contains(&t.id))).cloned().collect();
     for trace in &traces {
         workspace.samples.insert(trace.id, SampleState::Loading);
     }
+    let cache = workspace.cache_dir();
     AsyncComputeTaskPool::get().spawn(async move {
-        traces.into_iter().map(|trace| (trace.id, squiggle_io::load_trace(&trace).map_err(|e| e.to_string()))).collect()
+        traces
+            .into_iter()
+            .map(|trace| (trace.id, squiggle_io::sync::load_trace_from(&trace, cache.as_deref()).map_err(|e| e.to_string())))
+            .collect()
     })
 }
 
@@ -681,7 +815,7 @@ fn handle_requests(
                     workspace.replace(next);
                     queue.cancel();
                     let project = workspace.project.id;
-                    let task = load_traces(&mut workspace);
+                    let task = load_traces(&mut workspace, None);
                     tasks.loads.push((project, task));
                 }
                 Err(error) => workspace.error = Some(error),
@@ -723,6 +857,11 @@ fn handle_requests(
                 }
                 Err(error) => workspace.error = Some(error),
             },
+            WorkspaceRequest::Reload(ids) => {
+                let project = workspace.project.id;
+                let task = load_traces(&mut workspace, Some(ids));
+                tasks.loads.push((project, task));
+            }
             WorkspaceRequest::Discard(_) => {}
         }
     }

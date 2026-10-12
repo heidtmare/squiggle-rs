@@ -9,6 +9,7 @@ mod plot;
 mod classify_ui;
 mod live;
 mod live_ui;
+mod sync_ui;
 mod models_ui;
 mod scatter_ui;
 mod templates_ui;

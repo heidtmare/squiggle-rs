@@ -24,6 +24,7 @@ use crate::events_ui::{self, EventWindows};
 use crate::locate_ui::{self, LocateWindows};
 use crate::models_ui::{self, ModelRegistry, ModelWindows};
 use crate::live_ui::{self, LiveState};
+use crate::sync_ui::{self, SyncState};
 use crate::scatter_ui::{self, ScatterWindows};
 use crate::templates_ui::{self, TemplateWindows};
 use crate::process_ui::{self, ProcessWindows};
@@ -56,6 +57,9 @@ impl Plugin for UiPlugin {
             .init_resource::<TemplateWindows>()
             .init_resource::<ScatterWindows>()
             .init_resource::<LiveState>()
+            .init_resource::<SyncState>()
+            .add_systems(Startup, sync_ui::startup)
+            .add_systems(Update, sync_ui::poll_sync)
             .add_systems(Startup, live_ui::startup)
             .add_systems(Update, live_ui::poll_live)
             .add_systems(Startup, setup)
@@ -72,6 +76,7 @@ impl Plugin for UiPlugin {
                     templates_ui::windows,
                     scatter_ui::windows,
                     live_ui::window,
+                    sync_ui::window,
                     classify_ui::windows,
                 )
                     .chain(),
@@ -104,6 +109,7 @@ pub struct TrackAccess<'w, 's> {
     templates: ResMut<'w, TemplateWindows>,
     scatter: ResMut<'w, ScatterWindows>,
     live: ResMut<'w, LiveState>,
+    sync: ResMut<'w, SyncState>,
 }
 
 /// Which parts of the chrome are open.
@@ -332,6 +338,7 @@ fn menu_bar(
             project_ui::project_menu(ui, project);
             ui.separator();
             live_ui::live_menu(ui, &mut tracks.live);
+            sync_ui::sync_menu(ui, &mut tracks.sync);
         });
         ui.menu_button("Process", |ui| {
             process_ui::process_menu(ui, &mut tracks.process, &mut tracks.view);

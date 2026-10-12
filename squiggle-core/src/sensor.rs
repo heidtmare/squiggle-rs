@@ -15,9 +15,13 @@ use crate::time::Timestamp;
 pub struct Analyst(pub String);
 
 impl Analyst {
-    /// `$USER` / `$USERNAME`, else `unknown`.
+    /// `$SQUIGGLE_ANALYST`, else `$USER` / `$USERNAME`, else `unknown`.
     pub fn local() -> Self {
-        let name = std::env::var("USER")
+        let name = std::env::var("SQUIGGLE_ANALYST")
+            .ok()
+            .filter(|n| !n.trim().is_empty())
+            .ok_or(())
+            .or_else(|_| std::env::var("USER"))
             .or_else(|_| std::env::var("USERNAME"))
             .unwrap_or_else(|_| "unknown".to_string());
         Self(name)
