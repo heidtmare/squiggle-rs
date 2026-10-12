@@ -4,7 +4,10 @@
 //! gives the same probabilities in either.
 
 pub mod classical;
+pub mod deep;
 pub mod metrics;
+#[cfg(feature = "onnx")]
+pub mod onnx;
 pub mod package;
 pub mod preprocess;
 pub mod rng;

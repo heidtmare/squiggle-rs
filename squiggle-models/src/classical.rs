@@ -52,11 +52,37 @@ pub struct Params {
     pub min_leaf: usize,
     /// Trees (forest).
     pub trees: usize,
+    /// Passes over the data (deep).
+    pub epochs: usize,
+    /// Events per step (deep).
+    pub batch: usize,
+    /// Adam step size (deep).
+    pub learning_rate: f64,
+    /// Chance of dropping each present branch per step, keeping one (deep).
+    pub branch_dropout: f64,
+    /// Encoder channels (deep).
+    pub width: usize,
+    /// Classifier hidden units (deep).
+    pub hidden: usize,
 }
 
 impl Default for Params {
     fn default() -> Self {
-        Self { l2: 0.01, iterations: 500, rate: 0.5, k: 5, max_depth: 8, min_leaf: 1, trees: 100 }
+        Self {
+            l2: 0.01,
+            iterations: 500,
+            rate: 0.5,
+            k: 5,
+            max_depth: 8,
+            min_leaf: 1,
+            trees: 100,
+            epochs: 40,
+            batch: 16,
+            learning_rate: 3e-3,
+            branch_dropout: 0.3,
+            width: 16,
+            hidden: 32,
+        }
     }
 }
 

@@ -16,6 +16,7 @@ blake3 = { version = "1.8", features = ["pure"] }
 csv = "1.4"
 hound = "3.5"
 # `bundled` compiles SQLite from source: no system library needed.
+safetensors = "0.8"
 rusqlite = { version = "0.40", features = ["bundled"] }
 
 [dev-dependencies]

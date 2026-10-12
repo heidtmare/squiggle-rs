@@ -52,7 +52,7 @@ pub struct Verdict {
 
 impl Verdict {
     pub fn prediction(&self, config_hash: &str, taxonomy_version: u32) -> Prediction {
-        Prediction { model: RULES_MODEL.to_string(), config_hash: config_hash.to_string(), taxonomy_version, labels: self.labels.clone() }
+        Prediction { model: RULES_MODEL.to_string(), config_hash: config_hash.to_string(), taxonomy_version, labels: self.labels.clone(), parts: Vec::new() }
     }
 }
 

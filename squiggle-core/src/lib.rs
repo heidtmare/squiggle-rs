@@ -30,6 +30,7 @@ pub mod time;
 pub mod timeline;
 pub mod transform;
 pub mod view;
+pub mod windows;
 
 pub use axis::{Anchor, Axis, AxisKind, Orientation, Tick};
 pub use color::Rgba;

@@ -10,5 +10,9 @@ squiggle-core = { workspace = true, features = ["serde"] }
 squiggle-io.workspace = true
 squiggle-models.workspace = true
 
+[features]
+gpu = ["squiggle-models/gpu"]
+onnx = ["squiggle-models/onnx"]
+
 [dev-dependencies]
 tempfile = "3"

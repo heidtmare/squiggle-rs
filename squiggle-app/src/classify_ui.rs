@@ -15,11 +15,14 @@ use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, IoTaskPool, Task, futures::check_ready};
 use bevy_egui::{EguiContexts, egui};
 use squiggle_core::classify::{RULES_MODEL, RuleSettings, Verdict, rules};
-use squiggle_core::features::{EVENT_FEATURES, EventData, FEATURE_SET, FeatureSettings, Features, MEMBER_FEATURES, OriginData, TraceData, features};
+use squiggle_core::features::{kind_of, EVENT_FEATURES, EventData, FEATURE_SET, FeatureSettings, Features, MEMBER_FEATURES, OriginData, TraceData, features};
 use squiggle_core::taxonomy::NOISE;
 use squiggle_core::{Change, Event, EventStatus, Id, IqComponent, Label, LabelId, Prediction, Project, SampleKind, Timestamp, Trace};
 use squiggle_io::dataset::{FORMAT, Manifest, Table, write_dataset};
+use squiggle_core::windows::{WindowSpec, Windows};
+use squiggle_io::dataset::WindowTable;
 use squiggle_models::Package;
+use squiggle_models::package::Inputs;
 
 use crate::models_ui::ModelRegistry;
 use crate::process_ui::config_hash;
@@ -110,22 +113,28 @@ pub struct Classified {
 }
 
 /// Features and the rules verdict, plus each model's prediction from
-/// features computed with that model's own settings.
+/// features computed with that model's own settings and, for deep models,
+/// its own waveform windows. A model that abstains (a required
+/// phenomenology is missing) records nothing.
 pub fn classify_one(traces: &[TraceData], event: Id, data: EventData, settings: &ClassifySettings, models: &[Arc<Package>]) -> Classified {
     let features = features(traces, &data, &settings.features);
     let verdict = rules(&features.event, &settings.rules);
     let mut other: Vec<(FeatureSettings, Vec<f64>)> = Vec::new();
+    let mut cut: Vec<(Vec<WindowSpec>, Vec<Windows>)> = Vec::new();
     let predictions = models
         .iter()
-        .map(|model| {
+        .filter_map(|model| {
             let wanted = model.spec.input.settings;
-            if wanted == settings.features {
-                return model.prediction(&features.event);
-            }
-            if !other.iter().any(|o| o.0 == wanted) {
+            if wanted != settings.features && !other.iter().any(|o| o.0 == wanted) {
                 other.push((wanted, squiggle_core::features::features(traces, &data, &wanted).event));
             }
-            model.prediction(&other.iter().find(|o| o.0 == wanted).expect("pushed above").1)
+            let event = if wanted == settings.features { &features.event } else { &other.iter().find(|o| o.0 == wanted).expect("pushed above").1 };
+            let specs = model.window_specs();
+            if !cut.iter().any(|c| c.0 == specs) {
+                cut.push((specs.clone(), squiggle_core::windows::windows(traces, &data, &specs)));
+            }
+            let windows = &cut.iter().find(|c| c.0 == specs).expect("pushed above").1;
+            model.prediction(Inputs { features: event, windows })
         })
         .collect();
     Classified { event, data, features, verdict, predictions }
@@ -140,13 +149,14 @@ pub fn all_events(project: &Project, traces: &[TraceData]) -> Vec<(Id, EventData
     project.events().iter().filter_map(|e| Some((e.id, event_data(project, e, traces)?))).collect()
 }
 
-/// Replaces each result's event's predictions with the rules' and the models'.
-pub fn prediction_changes(project: &Project, results: &[Classified], hash: &str) -> Vec<Change> {
+/// Replaces each result's event's predictions with the rules' (unless
+/// `rules` is `None`; else its config hash) and the models'.
+pub fn prediction_changes(project: &Project, results: &[Classified], rules: Option<&str>) -> Vec<Change> {
     results
         .iter()
         .filter_map(|r| {
             let event = project.event(r.event)?;
-            let mut predictions = vec![r.verdict.prediction(hash, project.taxonomy().version)];
+            let mut predictions: Vec<Prediction> = rules.map(|hash| r.verdict.prediction(hash, project.taxonomy().version)).into_iter().collect();
             predictions.extend(r.predictions.iter().cloned());
             (predictions != event.predictions).then_some(Change::SetPredictions { event: r.event, predictions })
         })
@@ -164,7 +174,7 @@ pub fn label_change(project: &Project, id: Id, label: Option<LabelId>) -> Option
 /// unlabelled; rejected when that consensus is noise.
 pub fn accept_change(project: &Project, id: Id) -> Option<Change> {
     let event = project.event(id)?;
-    let top = event.consensus().first().map(|l| l.0.clone());
+    let top = project.consensus(event).first().map(|l| l.0.clone());
     if event.label.is_none() && top.as_ref().is_some_and(|l| l.as_str() == NOISE) {
         return (event.status != EventStatus::Rejected).then(|| Change::SetEvent(Event { status: EventStatus::Rejected, ..event.clone() }));
     }
@@ -177,7 +187,7 @@ pub fn review_order(project: &Project, queue: bool) -> Vec<Id> {
     let mut events: Vec<&Event> = project.events().iter().filter(|e| !queue || e.status == EventStatus::Auto).collect();
     events.sort_by(|a, b| {
         let by_time = a.time().seconds_since(b.time()).total_cmp(&0.0);
-        if queue { b.uncertainty().total_cmp(&a.uncertainty()).then(by_time) } else { by_time }
+        if queue { project.uncertainty(b).total_cmp(&project.uncertainty(a)).then(by_time) } else { by_time }
     });
     events.into_iter().map(|e| e.id).collect()
 }
@@ -193,8 +203,36 @@ pub fn training_class(event: &Event) -> Option<String> {
 /// An exported event: its result, the event and its training class.
 type Row<'a> = (&'a Classified, &'a Event, Option<String>);
 
-/// Events and members tables and the manifest for `results`.
-pub fn dataset(project: &Project, traces: &[TraceData], results: &[Classified], settings: &FeatureSettings, include_unlabelled: bool, analyst: &str) -> (Table, Table, Manifest) {
+/// Default window specs: one per assigned phenomenology with traces, at their median rate.
+pub fn default_window_specs(project: &Project) -> Vec<WindowSpec> {
+    let mut specs: Vec<WindowSpec> = Vec::new();
+    for phenomenology in project.phenomenologies() {
+        let mut rates: Vec<f64> = project
+            .traces()
+            .iter()
+            .filter(|t| project.trace_phenomenology(t).is_some_and(|p| p.id == phenomenology.id))
+            .map(|t| t.sample_rate)
+            .collect();
+        if rates.is_empty() || specs.iter().any(|s| s.phenomenology == phenomenology.id) {
+            continue;
+        }
+        rates.sort_by(f64::total_cmp);
+        specs.push(WindowSpec::default_for(phenomenology.id.clone(), kind_of(&phenomenology.propagation), rates[rates.len() / 2]));
+    }
+    specs
+}
+
+/// Events and members tables, windows (for `specs`) and the manifest for `results`.
+#[allow(clippy::too_many_arguments)]
+pub fn dataset(
+    project: &Project,
+    traces: &[TraceData],
+    results: &[Classified],
+    settings: &FeatureSettings,
+    specs: &[WindowSpec],
+    include_unlabelled: bool,
+    analyst: &str,
+) -> (Table, Table, Vec<WindowTable>, Manifest) {
     let taxonomy = project.taxonomy();
     let rows: Vec<Row> = results
         .iter()
@@ -254,6 +292,17 @@ pub fn dataset(project: &Project, traces: &[TraceData], results: &[Classified], 
         members.number(name, member_rows.iter().map(|r| r.0.features.members[r.2][i]).collect());
     }
 
+    let mut windows: Vec<WindowTable> =
+        specs.iter().map(|s| WindowTable { phenomenology: s.phenomenology.0.clone(), samples: s.samples, values: Vec::new(), events: Vec::new() }).collect();
+    for (row, r) in rows.iter().enumerate() {
+        for (table, cut) in windows.iter_mut().zip(squiggle_core::windows::windows(traces, &r.0.data, specs)) {
+            for w in cut.traces {
+                table.values.extend(w);
+                table.events.push(row as i64);
+            }
+        }
+    }
+
     let mut classes: Vec<(Option<String>, usize)> = Vec::new();
     for (_, _, class) in &rows {
         match classes.iter_mut().find(|c| &c.0 == class) {
@@ -271,6 +320,7 @@ pub fn dataset(project: &Project, traces: &[TraceData], results: &[Classified], 
         labels: taxonomy.labels.clone(),
         noise_class: NOISE.to_string(),
         feature_settings: Some(*settings),
+        windows: specs.to_vec(),
         event_features: EVENT_FEATURES.iter().map(|s| s.to_string()).collect(),
         member_features: MEMBER_FEATURES.iter().map(|s| s.to_string()).collect(),
         classes,
@@ -278,13 +328,14 @@ pub fn dataset(project: &Project, traces: &[TraceData], results: &[Classified], 
         members: 0,
         hashes: Vec::new(),
     };
-    (events, members, manifest)
+    (events, members, windows, manifest)
 }
 
 struct ExportJob {
     project: Project,
     traces: Vec<TraceData>,
     settings: ClassifySettings,
+    specs: Vec<WindowSpec>,
     include_unlabelled: bool,
     analyst: String,
 }
@@ -305,6 +356,10 @@ pub struct ClassifyWindows {
     new_name: String,
     new_parent: Option<LabelId>,
     include_unlabelled: bool,
+    /// Phenomenologies to export windows for, with their specs.
+    window_specs: Vec<(bool, WindowSpec)>,
+    /// Skip recording the rules prediction.
+    no_rules: bool,
     folder: Option<Task<Option<PathBuf>>>,
     export: Option<Task<Result<(PathBuf, Manifest), String>>>,
     exported: Option<Result<(PathBuf, Manifest), String>>,
@@ -338,7 +393,7 @@ pub fn windows(
         && let Some(results) = check_ready(task)
     {
         let (hash, _) = windows.task.take().expect("checked above");
-        let changes = prediction_changes(&workspace.project, &results, &hash);
+        let changes = prediction_changes(&workspace.project, &results, (!windows.no_rules).then_some(hash.as_str()));
         if !changes.is_empty() {
             workspace.execute_or_report(format!("Classify {} events", changes.len()), changes);
         }
@@ -399,6 +454,7 @@ fn classify_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace
         });
         let project = &workspace.project;
         let n = project.events().len();
+        ui.checkbox(&mut windows.no_rules, "Leave the rules out (record only the enabled models)");
         ui.horizontal(|ui| {
             let busy = windows.task.is_some();
             if ui.add_enabled(n > 0 && !busy, egui::Button::new(format!("Classify {n} events"))).clicked() {
@@ -516,9 +572,14 @@ fn features_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace
         let project = &workspace.project;
         let event = project.event(id).expect("checked above");
         let member_traces: Vec<Id> = event.members.iter().map(|m| m.trace).collect();
-        // Members, plus every air and EM trace for coupled arrivals.
+        // Members, every air and EM trace for coupled arrivals, and every
+        // trace of a phenomenology a deep model reads.
+        let branches: Vec<WindowSpec> = models.iter().flat_map(|m| m.window_specs()).collect();
         let traces = trace_data(project, |t| {
-            let wanted = member_traces.contains(&t.id) || project.trace_phenomenology(t).is_some_and(|p| matches!(p.propagation, squiggle_core::Propagation::Constant { .. }));
+            let wanted = member_traces.contains(&t.id)
+                || project.trace_phenomenology(t).is_some_and(|p| {
+                    matches!(p.propagation, squiggle_core::Propagation::Constant { .. }) || branches.iter().any(|b| b.phenomenology == p.id)
+                });
             if wanted { values.get(&t.id).cloned() } else { None }
         });
         windows.panel = event_data(project, event, &traces).map(|data| (id, revision, windows.settings, classify_one(&traces, id, data, &windows.settings, models)));
@@ -561,6 +622,16 @@ fn features_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace
                 ui.add_space(4.0);
                 ui.strong(format!("{} (computed now)", prediction.model.trim_start_matches("heidtmare.squiggle.model/")));
                 probability_bars(ui, project, &prediction.labels);
+                for (part, labels) in &prediction.parts {
+                    ui.weak(format!("  {part} alone"));
+                    probability_bars(ui, project, labels);
+                }
+            }
+            let consensus = project.consensus(event);
+            if event.predictions.len() > 1 {
+                ui.add_space(4.0);
+                ui.strong("Ensemble (recorded, weighted)").on_hover_text("Each model's vote is weighted as set in Events ▸ Models; the rules count 1");
+                probability_bars(ui, project, &consensus);
             }
             for prediction in &event.predictions {
                 ui.add_space(4.0);
@@ -732,6 +803,32 @@ fn export_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace: 
         ));
         ui.weak("Writes events.parquet, members.parquet and dataset.json into a folder: features, classes, provenance and the taxonomy version.");
         ui.checkbox(&mut windows.include_unlabelled, "Include unlabelled events (class left empty)");
+        // Keep one spec per phenomenology in the project, remembering edits.
+        let defaults = default_window_specs(project);
+        windows.window_specs.retain(|(_, s)| defaults.iter().any(|d| d.phenomenology == s.phenomenology));
+        for d in defaults {
+            if !windows.window_specs.iter().any(|(_, s)| s.phenomenology == d.phenomenology) {
+                windows.window_specs.push((false, d));
+            }
+        }
+        egui::CollapsingHeader::new("Waveform windows (for deep models)").show(ui, |ui| {
+            ui.weak("Per phenomenology: each trace from its onset (pick, else predicted from the origin), resampled, demeaned, unit peak; written to windows.safetensors.");
+            egui::Grid::new("window_specs").num_columns(6).striped(true).show(ui, |ui| {
+                for heading in ["", "Rate", "Before onset", "Samples", "Traces", "Length"] {
+                    ui.strong(heading);
+                }
+                ui.end_row();
+                for (on, spec) in &mut windows.window_specs {
+                    ui.checkbox(on, spec.phenomenology.as_str());
+                    ui.add(egui::DragValue::new(&mut spec.rate).range(0.1..=1e9).speed(1.0).suffix(" Hz"));
+                    ui.add(egui::DragValue::new(&mut spec.pre_s).range(0.0..=1e3).speed(0.05).suffix(" s"));
+                    ui.add(egui::DragValue::new(&mut spec.samples).range(32..=8192).speed(8.0));
+                    ui.add(egui::DragValue::new(&mut spec.max_traces).range(1..=256));
+                    ui.label(format!("{:.3} s", spec.duration()));
+                    ui.end_row();
+                }
+            });
+        });
         let busy = windows.folder.is_some() || windows.export.is_some();
         ui.horizontal(|ui| {
             let n = if windows.include_unlabelled { project.events().len() } else { labelled };
@@ -772,6 +869,7 @@ fn poll_export(windows: &mut ClassifyWindows, workspace: &Workspace, tracks: &Qu
                 project: workspace.project.clone(),
                 traces: trace_data(&workspace.project, |t| values.get(&t.id).cloned()),
                 settings: windows.settings,
+                specs: windows.window_specs.iter().filter(|s| s.0).map(|s| s.1.clone()).collect(),
                 include_unlabelled: windows.include_unlabelled,
                 analyst: workspace.analyst.0.clone(),
             };
@@ -781,8 +879,9 @@ fn poll_export(windows: &mut ClassifyWindows, workspace: &Workspace, tracks: &Qu
                     .filter(|(id, _)| job.include_unlabelled || job.project.event(*id).and_then(training_class).is_some())
                     .collect();
                 let results = classify(&job.traces, events, &job.settings, &[]);
-                let (events, members, manifest) = dataset(&job.project, &job.traces, &results, &job.settings.features, job.include_unlabelled, &job.analyst);
-                write_dataset(&folder, &events, &members, manifest).map(|m| (folder, m))
+                let (events, members, windows, manifest) =
+                    dataset(&job.project, &job.traces, &results, &job.settings.features, &job.specs, job.include_unlabelled, &job.analyst);
+                write_dataset(&folder, &events, &members, &windows, manifest).map(|m| (folder, m))
             }));
         }
     }
@@ -802,6 +901,7 @@ mod tests {
     use crate::workspace::{SampleState, SyntheticEvent};
     use squiggle_core::associate::AssociateSettings;
     use squiggle_core::taxonomy::{EARTHQUAKE, EXPLOSION};
+    use squiggle_core::model::ModelRef;
     use squiggle_core::{Analyst, Change};
 
     fn loaded(workspace: &Workspace, trace: &Trace) -> Option<Vec<f32>> {
@@ -813,7 +913,11 @@ mod tests {
 
     /// Detects and locates the mixed scene's events.
     fn detected() -> Workspace {
-        let mut workspace = Workspace::synthetic(Analyst("ana".into()), SyntheticEvent::Mixed).unwrap();
+        detected_scene(SyntheticEvent::Mixed)
+    }
+
+    fn detected_scene(scene: SyntheticEvent) -> Workspace {
+        let mut workspace = Workspace::synthetic(Analyst("ana".into()), scene).unwrap();
         let project = &workspace.project;
         let settings = AssociateSettings::default();
         let inputs: Vec<DetectInput> = project
@@ -836,6 +940,133 @@ mod tests {
         let origin = event.origin.as_ref()?;
         let reference = workspace.project.reference.unwrap();
         synthetic::MIXED.iter().find(|m| (origin.time.seconds_since(reference) - m.origin).abs() < 0.5)
+    }
+
+    /// The known class of the event nearest in origin time, within 0.5 s.
+    fn truth_label(workspace: &Workspace, event: &Event) -> Option<LabelId> {
+        let origin = event.origin.as_ref()?;
+        let i = workspace.truth_events.iter().position(|(_, t)| origin.time.seconds_since(*t).abs() < 0.5)?;
+        workspace.truth_labels.get(i).cloned()
+    }
+
+    /// Labels every detected event with its known class.
+    fn label_all(workspace: &mut Workspace) -> usize {
+        let project = &workspace.project;
+        let labels: Vec<Change> = project.events().iter().filter_map(|e| label_change(project, e.id, Some(truth_label(workspace, e)?))).collect();
+        let n = labels.len();
+        workspace.execute("label", labels).unwrap();
+        n
+    }
+
+    /// Classifies with `models` over the traces of `keep` phenomenologies; correct top labels and predictions.
+    fn classify_with(workspace: &Workspace, models: &[Arc<Package>], keep: &[&str]) -> (usize, Vec<(Id, Prediction)>) {
+        let project = &workspace.project;
+        let traces = trace_data(project, |t| {
+            let p = project.trace_phenomenology(t)?;
+            if keep.contains(&p.id.as_str()) { loaded(workspace, t) } else { None }
+        });
+        let results = classify(&traces, all_events(project, &traces), &ClassifySettings::default(), models);
+        let mut correct = 0;
+        let mut out = Vec::new();
+        for r in results {
+            let event = project.event(r.event).unwrap();
+            if let Some(p) = r.predictions.into_iter().next() {
+                correct += usize::from(Some(p.labels[0].0.clone()) == truth_label(workspace, event));
+                out.push((r.event, p));
+            }
+        }
+        (correct, out)
+    }
+
+    /// M8 self-check: a CNN trained on exported waveform windows of one
+    /// synthetic catalogue classifies another scene, and its late fusion still
+    /// classifies when infrasound or seismic sensors are missing. The app
+    /// computes exactly the trainer's probabilities.
+    #[test]
+    fn fused_cnns_classify_with_a_phenomenology_missing() {
+        use crate::models_ui::import_change;
+        use squiggle_models::deep::{Encoder, Fusion};
+        use squiggle_train::{Method, Options};
+
+        let mut catalogue = detected_scene(SyntheticEvent::Catalogue);
+        let n = label_all(&mut catalogue);
+        assert!(n >= synthetic::CATALOGUE_EVENTS - 2, "{n} of {} labelled", synthetic::CATALOGUE_EVENTS);
+        let project = &catalogue.project;
+        let traces = trace_data(project, |t| loaded(&catalogue, t));
+        let settings = ClassifySettings::default();
+        let results = classify(&traces, all_events(project, &traces), &settings, &[]);
+        let specs = default_window_specs(project);
+        assert_eq!(specs.iter().map(|s| s.phenomenology.as_str()).collect::<Vec<_>>(), ["seismic", "infrasound"]);
+        let (events, members, windows, manifest) = dataset(project, &traces, &results, &settings.features, &specs, false, "ana");
+        assert!(windows.iter().all(|w| w.events.len() >= n), "every event has windows of each");
+        let dir = tempfile::tempdir().unwrap();
+        write_dataset(&dir.path().join("dataset"), &events, &members, &windows, manifest).unwrap();
+        let data = squiggle_train::Dataset::load(&dir.path().join("dataset")).unwrap();
+
+        let params = squiggle_models::Params { epochs: 25, batch: 8, learning_rate: 5e-3, ..Default::default() };
+        let mut held_out = detected();
+        let mut packages = Vec::new();
+        for (name, encoder, fusion) in [("late", Encoder::Waveform, Fusion::Late), ("early", Encoder::Spectrogram, Fusion::Early)] {
+            let options = Options { method: Method::Cnn { encoder, fusion }, params: params.clone(), name: Some(name.into()), folds: 0, ..Options::default() };
+            let package = squiggle_train::train(&data, &options).unwrap();
+            let out = dir.path().join(name);
+            package.save(&out).unwrap();
+            let expected = squiggle_train::predictions(&package, &data);
+
+            // Same probabilities in the app as in the trainer.
+            let import = import_change(&catalogue.project, &out).unwrap();
+            catalogue.execute("import", vec![import]).unwrap();
+            let mut registry = ModelRegistry::default();
+            registry.refresh(&catalogue.project);
+            let loaded_package = registry.package(&package.spec.id).unwrap().clone();
+            let (_, app) = classify_with(&catalogue, std::slice::from_ref(&loaded_package), &["seismic", "infrasound"]);
+            assert!(app.len() >= n);
+            for (event, prediction) in &app {
+                let Some((_, Some(trainer))) = expected.iter().find(|e| e.0 == event.to_string()) else { continue };
+                for (label, p) in package.spec.output.labels.iter().zip(trainer) {
+                    assert_eq!(prediction.labels.iter().find(|l| l.0.as_str() == label).unwrap().1, *p as f32, "{name} {label}");
+                }
+            }
+
+            let import = import_change(&held_out.project, &out).unwrap();
+            held_out.execute("import", vec![import]).unwrap();
+            packages.push((name, loaded_package));
+        }
+
+        // Held out: the fixed mixed scene, with all sensors, without infrasound, without seismic.
+        for (name, package) in &packages {
+            let models = std::slice::from_ref(package);
+            let (all, predictions) = classify_with(&held_out, models, &["seismic", "infrasound"]);
+            assert!(all >= 9, "{name}: {all}/10 with every sensor");
+            if *name == "late" {
+                assert!(predictions.iter().all(|(_, p)| p.parts.len() == 2));
+            }
+            let (seismic, predictions) = classify_with(&held_out, models, &["seismic"]);
+            assert_eq!(predictions.len(), 10);
+            assert!(seismic >= 9, "{name}: {seismic}/10 without infrasound");
+            if *name == "late" {
+                assert!(predictions.iter().all(|(_, p)| p.parts.len() == 1 && p.parts[0].0 == "seismic"));
+            }
+            let (infrasound, _) = classify_with(&held_out, models, &["infrasound"]);
+            assert!(infrasound >= 8, "{name}: {infrasound}/10 without seismic");
+        }
+
+        // Ensemble: a zero-weight model does not move the consensus.
+        let mut registry = ModelRegistry::default();
+        registry.refresh(&held_out.project);
+        let models = registry.active(&held_out.project);
+        let project = &held_out.project;
+        let traces = trace_data(project, |t| loaded(&held_out, t));
+        let results = classify(&traces, all_events(project, &traces), &settings, &models);
+        let changes = prediction_changes(project, &results, Some(&settings.hash()));
+        held_out.execute("classify", changes).unwrap();
+        let event = held_out.project.events()[0].clone();
+        assert_eq!(event.predictions.len(), 3);
+        let early = held_out.project.models().iter().find(|m| m.id.contains("early")).unwrap().clone();
+        let late = held_out.project.models().iter().find(|m| m.id.contains("late")).unwrap().clone();
+        held_out.execute("weights", vec![Change::SetModel(ModelRef { weight: 0.0, ..early }), Change::SetModel(ModelRef { weight: 0.0, ..late })]).unwrap();
+        let rules_only = Event { predictions: vec![event.prediction(RULES_MODEL).unwrap().clone()], ..event.clone() };
+        assert_eq!(held_out.project.consensus(&event), rules_only.consensus());
     }
 
     /// M6 self-check: every synthetic earthquake and explosion is found,
@@ -872,15 +1103,15 @@ mod tests {
         assert!(range(EXPLOSION, "air_snr_db").0 > 20.0 && range(EARTHQUAKE, "air_snr_db").1 < 10.0);
 
         // Recording predictions leaves status alone and undoes; accepting takes the label.
-        let changes = prediction_changes(&workspace.project, &results, &settings.hash());
+        let changes = prediction_changes(&workspace.project, &results, Some(&settings.hash()));
         assert_eq!(changes.len(), 10);
         workspace.execute("classify", changes).unwrap();
-        assert!(prediction_changes(&workspace.project, &results, &settings.hash()).is_empty(), "re-running changes nothing");
+        assert!(prediction_changes(&workspace.project, &results, Some(&settings.hash())).is_empty(), "re-running changes nothing");
         let first = workspace.project.events()[0].clone();
         assert_eq!(first.status, EventStatus::Auto);
         let order = review_order(&workspace.project, true);
         assert_eq!(order.len(), 10);
-        let uncertainty: Vec<f32> = order.iter().map(|id| workspace.project.event(*id).unwrap().uncertainty()).collect();
+        let uncertainty: Vec<f32> = order.iter().map(|id| workspace.project.uncertainty(workspace.project.event(*id).unwrap())).collect();
         assert!(uncertainty.windows(2).all(|w| w[0] >= w[1]));
         let accept = accept_change(&workspace.project, first.id).unwrap();
         workspace.execute("accept", vec![accept]).unwrap();
@@ -913,14 +1144,15 @@ mod tests {
         let traces = trace_data(project, |t| loaded(&workspace, t));
         let settings = ClassifySettings::default();
         let results = classify(&traces, all_events(project, &traces), &settings, &[]);
-        let (events, members, manifest) = dataset(project, &traces, &results, &settings.features, false, "ana");
+        let (events, members, windows, manifest) = dataset(project, &traces, &results, &settings.features, &[], false, "ana");
+        assert!(windows.is_empty());
         let dir = tempfile::tempdir().unwrap();
-        write_dataset(&dir.path().join("dataset"), &events, &members, manifest).unwrap();
+        write_dataset(&dir.path().join("dataset"), &events, &members, &windows, manifest).unwrap();
 
         let data = squiggle_train::Dataset::load(&dir.path().join("dataset")).unwrap();
         let mut expected = Vec::new();
         for kind in [Kind::Logistic, Kind::Forest] {
-            let package = squiggle_train::train(&data, &squiggle_train::Options { kind, ..Default::default() }).unwrap();
+            let package = squiggle_train::train(&data, &squiggle_train::Options { method: squiggle_train::Method::Classical(kind), ..Default::default() }).unwrap();
             assert_eq!(package.spec.output.labels, [EARTHQUAKE, EXPLOSION]);
             assert_eq!(package.spec.training.cross_validation.accuracy, 1.0, "{kind:?}");
             let out = dir.path().join(kind.name());
@@ -936,12 +1168,12 @@ mod tests {
         assert_eq!(models.len(), 2);
         let project = &workspace.project;
         let results = classify(&traces, all_events(project, &traces), &settings, &models);
-        let changes = prediction_changes(project, &results, &settings.hash());
+        let changes = prediction_changes(project, &results, Some(&settings.hash()));
         workspace.execute("classify", changes).unwrap();
         for event in workspace.project.events() {
             assert_eq!(event.predictions.len(), 3);
             for (id, labels, rows) in &expected {
-                let trainer = &rows.iter().find(|r| r.0 == event.id.to_string()).unwrap().1;
+                let trainer = rows.iter().find(|r| r.0 == event.id.to_string()).unwrap().1.as_ref().unwrap();
                 let app = event.prediction(id).unwrap();
                 for (label, p) in labels.iter().zip(trainer) {
                     assert_eq!(app.labels.iter().find(|l| l.0.as_str() == label).unwrap().1, *p as f32, "{id} {label}");
@@ -970,7 +1202,7 @@ mod tests {
     fn accepting_a_noise_consensus_rejects() {
         let mut workspace = detected();
         let id = workspace.project.events()[0].id;
-        let noise = Prediction { model: "m@1".into(), config_hash: "h".into(), taxonomy_version: 1, labels: vec![(LabelId::new(NOISE), 0.8), (LabelId::new(EXPLOSION), 0.2)] };
+        let noise = Prediction { model: "m@1".into(), config_hash: "h".into(), taxonomy_version: 1, labels: vec![(LabelId::new(NOISE), 0.8), (LabelId::new(EXPLOSION), 0.2)], parts: vec![] };
         workspace.execute("predict", vec![Change::SetPredictions { event: id, predictions: vec![noise] }]).unwrap();
         let accept = accept_change(&workspace.project, id).unwrap();
         workspace.execute("accept", vec![accept]).unwrap();
@@ -991,7 +1223,7 @@ mod tests {
         let project = &workspace.project;
         let traces = trace_data(project, |t| loaded(&workspace, t));
         let results = classify(&traces, all_events(project, &traces), &ClassifySettings::default(), &[]);
-        let (events, members, manifest) = dataset(project, &traces, &results, &FeatureSettings::default(), false, "ana");
+        let (events, members, _, manifest) = dataset(project, &traces, &results, &FeatureSettings::default(), &[], false, "ana");
         assert_eq!(events.rows(), 2);
         let column = |table: &Table, name: &str| table.columns.iter().find(|c| c.0 == name).unwrap().1.clone();
         let squiggle_io::dataset::Values::Text(classes) = column(&events, "class") else { panic!() };
@@ -1003,7 +1235,7 @@ mod tests {
         assert_eq!(manifest.taxonomy_version, project.taxonomy().version);
 
         let dir = tempfile::tempdir().unwrap();
-        let written = write_dataset(dir.path(), &events, &members, manifest).unwrap();
+        let written = write_dataset(dir.path(), &events, &members, &[], manifest).unwrap();
         assert_eq!(written.events, 2);
         assert!(dir.path().join(squiggle_io::dataset::MEMBERS_FILE).exists());
     }

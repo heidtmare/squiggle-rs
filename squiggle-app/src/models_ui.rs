@@ -72,7 +72,8 @@ impl ModelRegistry {
     }
 }
 
-/// Refuses a package with labels the project lacks; warns on a taxonomy version change.
+/// Refuses a package with labels the project lacks; warns on a taxonomy
+/// version change and on phenomenologies the project has no traces of.
 pub fn fits(project: &Project, package: &Package) -> Result<Option<String>, String> {
     let taxonomy = project.taxonomy();
     let missing: Vec<&str> =
@@ -80,8 +81,33 @@ pub fn fits(project: &Project, package: &Package) -> Result<Option<String>, Stri
     if !missing.is_empty() {
         return Err(format!("labels missing from the project: {}", missing.join(", ")));
     }
-    Ok((package.spec.output.taxonomy_version != taxonomy.version)
-        .then(|| format!("trained on taxonomy version {}; the project is at {}", package.spec.output.taxonomy_version, taxonomy.version)))
+    let mut warnings = Vec::new();
+    if package.spec.output.taxonomy_version != taxonomy.version {
+        warnings.push(format!("trained on taxonomy version {}; the project is at {}", package.spec.output.taxonomy_version, taxonomy.version));
+    }
+    for branch in &package.spec.input.branches {
+        let id = &branch.window.phenomenology;
+        if !project.traces().iter().any(|t| project.trace_phenomenology(t).is_some_and(|p| &p.id == id)) {
+            warnings.push(format!("no {id} traces{}", if branch.required { ": the model is required to abstain" } else { ": fused from the rest" }));
+        }
+    }
+    Ok((!warnings.is_empty()).then(|| warnings.join("\n")))
+}
+
+/// Kind and inputs, e.g. "cnn (late): seismic*, infrasound" (* required).
+pub fn describe(package: &Package) -> String {
+    let spec = &package.spec;
+    if spec.input.branches.is_empty() {
+        return format!("{} on {} features", spec.kind, spec.input.features.len());
+    }
+    let branches: Vec<String> = spec
+        .input
+        .branches
+        .iter()
+        .map(|b| format!("{}{} ({:?})", b.window.phenomenology, if b.required { "*" } else { "" }, b.encoder).to_lowercase())
+        .collect();
+    let fusion = spec.input.fusion.map_or(String::new(), |f| format!(" {f:?}").to_lowercase());
+    format!("{}{fusion}: {}", spec.kind, branches.join(", "))
 }
 
 /// Registers the package in `dir`, enabled.
@@ -89,7 +115,7 @@ pub fn import_change(project: &Project, dir: &Path) -> Result<Change, String> {
     let package = Package::load(dir)?;
     fits(project, &package)?;
     let path = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-    Ok(Change::SetModel(ModelRef { id: package.spec.id.clone(), path: path.to_string_lossy().into_owned(), hash: package.hash.clone(), enabled: true }))
+    Ok(Change::SetModel(ModelRef { id: package.spec.id.clone(), path: path.to_string_lossy().into_owned(), hash: package.hash.clone(), enabled: true, weight: 1.0 }))
 }
 
 /// Reviewed or rejected events `model` predicted, and how many it got right
@@ -115,6 +141,7 @@ pub struct ModelWindows {
     pub open: bool,
     folder: Option<Task<Option<PathBuf>>>,
     error: Option<String>,
+    weights: HashMap<String, f32>,
 }
 
 pub fn models_menu(ui: &mut egui::Ui, windows: &mut ModelWindows) {
@@ -127,6 +154,7 @@ pub fn models_menu(ui: &mut egui::Ui, windows: &mut ModelWindows) {
 pub fn windows(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut registry: ResMut<ModelRegistry>, mut windows: ResMut<ModelWindows>) -> Result {
     registry.refresh(&workspace.project);
     let ctx = contexts.ctx_mut()?.clone();
+    let windows = &mut *windows;
     if let Some(task) = &mut windows.folder
         && let Some(folder) = check_ready(task)
     {
@@ -147,15 +175,16 @@ pub fn windows(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut
     }
     let mut open = true;
     let mut change: Option<(&str, Change)> = None;
+    let weights = &mut windows.weights;
     egui::Window::new("Models").open(&mut open).default_width(640.0).show(&ctx, |ui| {
         let project = &workspace.project;
-        ui.weak("Packages written by squiggle-train. Events ▸ Classify runs the rules and every enabled model; predictions record each model's id.");
+        ui.weak("Packages written by squiggle-train. Events ▸ Classify runs the rules and every enabled model; predictions record each model's id. The catalogue, queue and Accept use the weighted ensemble.");
         if project.models().is_empty() {
             ui.label("No models imported.");
         }
-        egui::Grid::new("models").num_columns(7).striped(true).show(ui, |ui| {
+        egui::Grid::new("models").num_columns(9).striped(true).show(ui, |ui| {
             if !project.models().is_empty() {
-                for heading in ["On", "Model", "Labels", "Trained on", "Cross-validated", "Analysts agree", ""] {
+                for heading in ["On", "Model", "Inputs", "Labels", "Trained on", "Cross-validated", "Analysts agree", "Weight", ""] {
                     ui.strong(heading);
                 }
                 ui.end_row();
@@ -182,6 +211,7 @@ pub fn windows(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut
                 match package {
                     Ok(p) => {
                         let t = &p.spec.training;
+                        ui.label(describe(p)).on_hover_text("* required phenomenology");
                         ui.label(p.spec.output.labels.join(", ")).on_hover_text(format!("{} level", p.spec.output.level));
                         ui.label(format!("{} events", t.events)).on_hover_text(format!("{}\ndataset {}", t.project, &t.dataset[..t.dataset.len().min(12)]));
                         if t.folds > 0 {
@@ -192,7 +222,7 @@ pub fn windows(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut
                         }
                     }
                     Err(_) => {
-                        for _ in 0..3 {
+                        for _ in 0..4 {
                             ui.weak("—");
                         }
                     }
@@ -201,6 +231,16 @@ pub fn windows(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut
                     (_, 0) => ui.weak("—"),
                     (agree, total) => ui.label(format!("{:.0}% of {total}", agree as f64 * 100.0 / total as f64)),
                 };
+                // Edited locally while dragging; one undoable change on release.
+                let weight = weights.entry(model.id.clone()).or_insert(model.weight);
+                let response = ui.add(egui::DragValue::new(weight).range(0.0..=10.0).speed(0.05)).on_hover_text("Vote in the ensemble consensus (the rules count 1)");
+                let done = response.drag_stopped() || response.lost_focus() || (response.changed() && !response.dragged());
+                if done && *weight != model.weight {
+                    change = Some(("Model weight", Change::SetModel(ModelRef { weight: *weight, ..model.clone() })));
+                }
+                if !response.dragged() && !response.has_focus() && !done {
+                    *weight = model.weight;
+                }
                 if ui.small_button("🗑").on_hover_text("Remove from the project (the package stays on disk)").clicked() {
                     change = Some(("Remove model", Change::RemoveModel { model: model.id.clone() }));
                 }

@@ -12,4 +12,12 @@ pub struct ModelRef {
     /// blake3 of the package files, at import.
     pub hash: String,
     pub enabled: bool,
+    /// Vote in the ensemble consensus.
+    #[cfg_attr(feature = "serde", serde(default = "one"))]
+    pub weight: f32,
+}
+
+#[cfg(feature = "serde")]
+fn one() -> f32 {
+    1.0
 }

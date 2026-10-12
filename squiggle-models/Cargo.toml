@@ -11,6 +11,17 @@ serde.workspace = true
 serde_json.workspace = true
 blake3 = { version = "1.8", features = ["pure"] }
 toml = "1"
+# Pure-Rust CPU tensors (flex) for inference; autodiff and Adam for training.
+burn = { version = "0.22", default-features = false, features = ["std", "flex", "autodiff", "optim", "safetensors"] }
+
+tract-onnx = { version = "0.23", optional = true }
+
+[features]
+# GPU training through wgpu (Vulkan, Metal, DX12).
+gpu = ["burn/wgpu"]
+# Imported ONNX models on event features (tract, pure Rust).
+onnx = ["dep:tract-onnx"]
 
 [dev-dependencies]
+prost = "0.14"
 tempfile = "3"
