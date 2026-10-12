@@ -436,6 +436,7 @@ impl ImportQueue {
             // Most recent layout used in this project, else the last one entered.
             let used = project.traces().iter().rev().find_map(|t| match &t.source {
                 TraceSource::File { layout, .. } => *layout,
+                TraceSource::Stream { .. } => None,
             });
             if let Some(layout) = used {
                 self.raw_layout = layout;
@@ -622,16 +623,12 @@ fn read_files(paths: Vec<PathBuf>, layout: Option<RawLayout>) -> Task<Vec<FileOu
 }
 
 fn load_traces(workspace: &mut Workspace) -> Task<SampleLoad> {
-    let sources: Vec<(Id, TraceSource)> =
-        workspace.project.traces().iter().map(|t| (t.id, t.source.clone())).collect();
-    for (id, _) in &sources {
-        workspace.samples.insert(*id, SampleState::Loading);
+    let traces: Vec<squiggle_core::Trace> = workspace.project.traces().to_vec();
+    for trace in &traces {
+        workspace.samples.insert(trace.id, SampleState::Loading);
     }
     AsyncComputeTaskPool::get().spawn(async move {
-        sources
-            .into_iter()
-            .map(|(id, source)| (id, squiggle_io::load_samples(&source).map_err(|e| e.to_string())))
-            .collect()
+        traces.into_iter().map(|trace| (trace.id, squiggle_io::load_trace(&trace).map_err(|e| e.to_string()))).collect()
     })
 }
 
@@ -906,7 +903,7 @@ mod tests {
         let mut workspace = workspace();
         let layout = RawLayout { channels: 4, big_endian: true, ..RawLayout::default() };
         let mut raw = row("dump", "2026-10-11T00:00:00Z", "1e9", Some("emp"));
-        let TraceSource::File { layout: slot, .. } = &mut raw.source;
+        let TraceSource::File { layout: slot, .. } = &mut raw.source else { panic!() };
         *slot = Some(layout);
         let mut queue = ImportQueue { rows: vec![raw], ..ImportQueue::default() };
         assert!(queue.confirm(&mut workspace));

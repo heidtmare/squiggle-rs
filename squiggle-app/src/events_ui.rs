@@ -14,7 +14,7 @@ use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures::check_ready};
 use bevy_egui::{EguiContexts, egui};
 use squiggle_core::associate::{AssociateSettings, Candidate, associate, Arrival};
-use squiggle_core::dsp::{DetectorSpec, MatchedSpec, detect, matched, refine};
+use squiggle_core::dsp::{DetectorSpec, MatchedSpec, Trigger, detect, matched, refine};
 use squiggle_core::template::TemplateTrace;
 use squiggle_core::locate::surface_distance;
 use squiggle_core::sensor::Provenance;
@@ -127,56 +127,91 @@ pub fn run_detection(inputs: &[DetectInput], settings: &AssociateSettings, chunk
     let mut detections = Vec::new();
     let mut errors = Vec::new();
     for (i, input) in inputs.iter().enumerate() {
+        let mut own = Vec::new();
         match detect(&input.spec, input.rate, &input.values, chunk) {
             Ok(triggers) => {
-                let window = input.spec.window(input.rate);
                 let mut floor = 0;
                 for trigger in triggers {
-                    if let Some(onset) = refine(&input.values, input.rate, &trigger, window, floor) {
-                        let offset = onset.index as f64 / input.rate;
-                        detections.push(Detection {
-                            input: i,
-                            onset: Picked { time: input.recorded.add_seconds(offset), ratio: onset.ratio, uncertainty_s: onset.uncertainty_s },
-                            at: input.start + offset,
-                            end: input.start + trigger.off as f64 / input.rate,
-                        });
-                    }
+                    own.extend(input.onset(i, &trigger, floor));
                     floor = trigger.off;
                 }
             }
             Err(error) => errors.push((input.trace, error)),
         }
-        if input.templates.is_empty() {
-            continue;
-        }
-        let templates: Vec<&TemplateTrace> = input.templates.iter().collect();
-        match matched(&templates, input.rate, &input.matched, &input.values, chunk) {
-            Ok(triggers) => {
-                let step = (input.rate / templates.iter().map(|t| t.rate).fold(0.0, f64::max)).floor().max(1.0) / input.rate;
-                let span = input.matched.length_s;
-                for trigger in triggers {
-                    let offset = trigger.on as f64 / input.rate;
-                    let at = input.start + offset;
-                    if detections.iter().any(|d: &Detection| d.input == i && (d.at - at).abs() < SAME_ONSET_S) {
-                        continue;
-                    }
-                    // Later phases of a repeat the detector saw only from them.
-                    detections.retain(|d| !(d.input == i && d.at > at && d.at < at + span));
-                    detections.push(Detection {
-                        input: i,
-                        onset: Picked { time: input.recorded.add_seconds(offset), ratio: trigger.peak, uncertainty_s: step },
-                        at,
-                        end: input.start + trigger.off as f64 / input.rate,
-                    });
+        if !input.templates.is_empty() {
+            let templates: Vec<&TemplateTrace> = input.templates.iter().collect();
+            match matched(&templates, input.rate, &input.matched, &input.values, chunk) {
+                Ok(triggers) => {
+                    let matched: Vec<Detection> = triggers.iter().map(|t| input.matched_onset(i, t)).collect();
+                    own = merge_matched(own, &matched, input.matched.length_s);
                 }
+                Err(error) => errors.push((input.trace, error)),
             }
-            Err(error) => errors.push((input.trace, error)),
+        }
+        detections.extend(own);
+    }
+    let refs: Vec<&DetectInput> = inputs.iter().collect();
+    let candidates = associate(&arrivals(&refs, &detections), settings);
+    DetectOutcome { detections, candidates, errors }
+}
+
+impl DetectInput {
+    /// Samples before a trigger's `on` that onset refinement may reach.
+    pub fn lookback(&self) -> usize {
+        4 * self.spec.window(self.rate) + 8
+    }
+
+    /// Samples after a trigger's `on` that onset refinement reads.
+    pub fn lookahead(&self) -> usize {
+        self.spec.window(self.rate) + 8
+    }
+
+    /// A detector trigger refined to an onset by AIC over `values`, not before `floor`.
+    pub fn onset(&self, input: usize, trigger: &Trigger, floor: usize) -> Option<Detection> {
+        let onset = refine(&self.values, self.rate, trigger, self.spec.window(self.rate), floor)?;
+        let offset = onset.index as f64 / self.rate;
+        Some(Detection {
+            input,
+            onset: Picked { time: self.recorded.add_seconds(offset), ratio: onset.ratio, uncertainty_s: onset.uncertainty_s },
+            at: self.start + offset,
+            end: self.start + trigger.off as f64 / self.rate,
+        })
+    }
+
+    /// A matched-filter trigger: its onset is the best alignment's.
+    pub fn matched_onset(&self, input: usize, trigger: &Trigger) -> Detection {
+        let top = self.templates.iter().map(|t| t.rate).fold(0.0, f64::max);
+        let step = (self.rate / top).floor().max(1.0) / self.rate;
+        let offset = trigger.on as f64 / self.rate;
+        Detection {
+            input,
+            onset: Picked { time: self.recorded.add_seconds(offset), ratio: trigger.peak, uncertainty_s: step },
+            at: self.start + offset,
+            end: self.start + trigger.off as f64 / self.rate,
         }
     }
-    let arrivals: Vec<Arrival> = detections
+}
+
+/// One trace's detector onsets with its matched-filter onsets, in order: a
+/// matched onset near a detector's is dropped; detector onsets within `span`
+/// after a kept one are its later phases and are dropped.
+pub fn merge_matched(mut own: Vec<Detection>, matched: &[Detection], span: f64) -> Vec<Detection> {
+    for m in matched {
+        if own.iter().any(|d| (d.at - m.at).abs() < SAME_ONSET_S) {
+            continue;
+        }
+        own.retain(|d| !(d.at > m.at && d.at < m.at + span));
+        own.push(m.clone());
+    }
+    own
+}
+
+/// Association inputs for `detections`.
+pub fn arrivals(inputs: &[&DetectInput], detections: &[Detection]) -> Vec<Arrival> {
+    detections
         .iter()
         .map(|d| {
-            let input = &inputs[d.input];
+            let input = inputs[d.input];
             Arrival {
                 trace: input.trace,
                 sensor: input.sensor,
@@ -187,9 +222,7 @@ pub fn run_detection(inputs: &[DetectInput], settings: &AssociateSettings, chunk
                 coda_s: input.coda_s,
             }
         })
-        .collect();
-    let candidates = associate(&arrivals, settings);
-    DetectOutcome { detections, candidates, errors }
+        .collect()
 }
 
 /// What applying a detection needs of each input.

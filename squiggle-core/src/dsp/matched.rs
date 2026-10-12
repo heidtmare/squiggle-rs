@@ -187,6 +187,13 @@ impl Detector for MatchedFilter {
         chunk.iter().filter_map(|&v| self.step(if v.is_finite() { f64::from(v) } else { 0.0 })).collect()
     }
 
+    /// A correlation completes a template length after its onset.
+    fn settled(&self) -> usize {
+        let earliest = self.kernels.iter().map(|k| k.onset).min().unwrap_or(0);
+        let window = (self.seen + earliest).saturating_sub(self.longest) * self.decimate;
+        [self.active.as_ref(), self.pending.as_ref()].into_iter().flatten().map(|(_, best)| *best).fold(window, usize::min)
+    }
+
     fn finish(&mut self) -> Vec<Trigger> {
         let end = self.seen * self.decimate;
         let open = self.active.take().map(|(t, best)| Trigger { on: best, off: end.max(best + 1), ..t });
@@ -258,6 +265,23 @@ mod tests {
             assert!((onset - at).abs() <= 0.03, "{trigger:?} for {at}");
             assert!(trigger.off > trigger.on && trigger.peak > 0.5);
         }
+    }
+
+    #[test]
+    fn later_triggers_start_after_the_settled_index() {
+        let x = record(&[(20.0, 1.0), (55.0, 0.15), (90.0, 0.3)], 120.0);
+        let t = template();
+        let mut filter = MatchedFilter::new(&[&t], 100.0, &MatchedSpec::default()).unwrap();
+        let mut settled = 0;
+        let mut seen = 0;
+        for chunk in x.chunks(37) {
+            for trigger in filter.process(chunk) {
+                assert!(trigger.on >= settled, "{trigger:?} before {settled}");
+                seen += 1;
+            }
+            settled = filter.settled();
+        }
+        assert_eq!(seen + filter.finish().len(), 3);
     }
 
     #[test]

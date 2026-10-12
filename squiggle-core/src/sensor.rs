@@ -112,13 +112,30 @@ pub enum TraceSource {
         #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
         layout: Option<RawLayout>,
     },
+    /// Recorded from a live feed: little-endian f32 samples (I/Q pairs when
+    /// complex) appended to `path` as they arrive. The trace covers the first
+    /// `bytes`, whose BLAKE3 is `content_hash`; a recording that ran on
+    /// past its last checkpoint still loads.
+    Stream {
+        endpoint: String,
+        /// Channel code as the feed named it.
+        code: String,
+        path: String,
+        bytes: u64,
+        content_hash: String,
+    },
 }
 
 impl TraceSource {
     pub fn describe(&self) -> String {
         match self {
             Self::File { path, channel, .. } => format!("{path} #{channel}"),
+            Self::Stream { endpoint, code, .. } => format!("{endpoint} {code}"),
         }
+    }
+
+    pub fn is_stream(&self) -> bool {
+        matches!(self, Self::Stream { .. })
     }
 }
 

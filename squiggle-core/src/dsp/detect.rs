@@ -86,6 +86,8 @@ pub trait Detector: Send {
     fn process(&mut self, chunk: &[f32]) -> Vec<Trigger>;
     /// Closes a trigger still open at the end of the stream.
     fn finish(&mut self) -> Vec<Trigger>;
+    /// No trigger reported later has its `on` before this sample index.
+    fn settled(&self) -> usize;
 }
 
 /// Runs `spec` over `values` in chunks of `chunk` samples.
@@ -286,6 +288,10 @@ impl Detector for Streaming {
     fn finish(&mut self) -> Vec<Trigger> {
         self.trigger.finish().into_iter().collect()
     }
+
+    fn settled(&self) -> usize {
+        self.trigger.active.as_ref().map_or(self.trigger.index, |t| t.on)
+    }
 }
 
 #[cfg(test)]
@@ -353,6 +359,21 @@ mod tests {
         let spec = DetectorSpec::StaLta { sta_s: 0.3, lta_s: 5.0, on: 4.0, off: 1.5, recursive: false };
         let triggers = detect(&spec, 100.0, &x, 100).unwrap();
         assert_eq!(triggers.last().map(|t| t.off), Some(3000));
+    }
+
+    #[test]
+    fn later_triggers_start_after_the_settled_index() {
+        let x = signal(9000, &[1500, 4000, 7000], 100.0);
+        for spec in specs() {
+            let mut detector = spec.build(100.0).unwrap();
+            let mut settled = 0;
+            for chunk in x.chunks(50) {
+                for t in detector.process(chunk) {
+                    assert!(t.on >= settled, "{}: {t:?} before {settled}", spec.label());
+                }
+                settled = detector.settled();
+            }
+        }
     }
 
     #[test]
