@@ -25,6 +25,7 @@ pub mod project;
 pub mod samples;
 pub mod sensor;
 pub mod squiggle;
+pub mod sync;
 pub mod taxonomy;
 pub mod template;
 pub mod time;

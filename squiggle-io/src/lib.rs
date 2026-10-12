@@ -14,6 +14,7 @@ mod sigmf;
 mod source;
 mod store;
 pub mod stream;
+pub mod sync;
 mod wav;
 
 use core::fmt;

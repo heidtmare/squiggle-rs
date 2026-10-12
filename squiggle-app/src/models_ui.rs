@@ -31,6 +31,8 @@ struct Loaded {
 #[derive(Resource, Default)]
 pub struct ModelRegistry {
     loaded: HashMap<String, Loaded>,
+    /// Shared-file cache: a package missing from its path is looked up here by hash.
+    pub cache: Option<std::path::PathBuf>,
 }
 
 impl ModelRegistry {
@@ -41,7 +43,12 @@ impl ModelRegistry {
             if self.loaded.get(&model.id).is_some_and(|l| l.path == model.path && l.hash == model.hash) {
                 continue;
             }
-            let package = Package::load(Path::new(&model.path)).and_then(|p| {
+            let cached = self.cache.as_ref().map(|c| squiggle_io::sync::blob_dir(c, &model.hash)).filter(|d| d.is_dir());
+            let dir = match cached {
+                Some(dir) if !Path::new(&model.path).is_dir() => dir,
+                _ => Path::new(&model.path).to_path_buf(),
+            };
+            let package = Package::load(&dir).and_then(|p| {
                 if p.hash != model.hash {
                     Err("the package changed since it was imported; import it again".to_string())
                 } else if p.spec.id != model.id {
@@ -229,6 +236,11 @@ pub fn models_menu(ui: &mut egui::Ui, windows: &mut ModelWindows) {
 }
 
 pub fn windows(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut registry: ResMut<ModelRegistry>, mut windows: ResMut<ModelWindows>) -> Result {
+    let cache = workspace.cache_dir();
+    if registry.cache != cache {
+        registry.cache = cache;
+        registry.loaded.clear();
+    }
     registry.refresh(&workspace.project);
     let ctx = contexts.ctx_mut()?.clone();
     let windows = &mut *windows;
