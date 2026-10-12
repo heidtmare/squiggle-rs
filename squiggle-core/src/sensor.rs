@@ -133,7 +133,7 @@ pub struct Alignment {
     pub locked: bool,
 }
 
-/// An arrival marked on a trace. One per trace and phase.
+/// An arrival marked on a trace. One per trace, phase and event.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Pick {
@@ -148,6 +148,9 @@ pub struct Pick {
     pub uncertainty_s: f64,
     /// Manual picks are locked against automatic re-picks.
     pub provenance: Provenance,
+    /// The event it belongs to; `None` outside any event.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub event: Option<Id>,
 }
 
 impl Pick {

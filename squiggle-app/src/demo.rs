@@ -54,7 +54,7 @@ impl Default for DemoOptions {
 }
 
 pub const USAGE: &str = "\
-Usage: squiggle-app [--project FILE | --synthetic | --located] [--squiggles N] [--samples N]
+Usage: squiggle-app [--project FILE | --synthetic | --located | --swarm] [--squiggles N] [--samples N]
                     [--demo SCENE] [--screenshot FILE] [WAVEFORM...]
 
   WAVEFORM...        import these files at startup (miniSEED, SAC, SigMF,
@@ -63,6 +63,8 @@ Usage: squiggle-app [--project FILE | --synthetic | --located] [--squiggles N] [
   --synthetic        start with a synthetic event of known delays (alignment demo)
   --located          start with a synthetic EMP, seismic and infrasound event of
                      known source (picking and location demo)
+  --swarm            start with two minutes of synthetic seismic data holding
+                     several events and glitches (detection demo)
   --squiggles N      put N squiggles on the plot at startup (default 0)
   --samples N        samples per generated squiggle (default 1000)
   --demo SCENE       open a transform demo: fourier or wavelet
@@ -106,6 +108,7 @@ impl DemoOptions {
                 }
                 "--synthetic" => options.synthetic = Some(SyntheticEvent::Alignment),
                 "--located" => options.synthetic = Some(SyntheticEvent::Located),
+                "--swarm" => options.synthetic = Some(SyntheticEvent::Swarm),
                 "--help" | "-h" => return Err(USAGE.to_string()),
                 other if other.starts_with('-') => {
                     return Err(format!("unrecognised argument: {other}\n\n{USAGE}"));
@@ -243,6 +246,7 @@ mod tests {
     fn the_synthetic_event_can_be_asked_for() {
         assert_eq!(parse(&["--synthetic"]).unwrap().synthetic, Some(SyntheticEvent::Alignment));
         assert_eq!(parse(&["--located"]).unwrap().synthetic, Some(SyntheticEvent::Located));
+        assert_eq!(parse(&["--swarm"]).unwrap().synthetic, Some(SyntheticEvent::Swarm));
     }
 
     #[test]

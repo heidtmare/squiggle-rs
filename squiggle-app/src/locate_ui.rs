@@ -58,7 +58,7 @@ pub struct PickInput {
     pub settings: PickSettings,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Picked {
     /// On the trace's own clock.
     pub time: Timestamp,
@@ -79,15 +79,16 @@ pub fn run_pick(input: &PickInput, choice: Choice) -> Result<Option<Picked>, Str
     }))
 }
 
-/// The automatic pick for `trace` at `picked`, as a change.
-pub fn pick_change(trace: Id, phase: &str, picked: &Picked, config_hash: &str) -> Change {
+/// The automatic pick for `trace` at `picked` in `event`, as a change.
+pub fn pick_change(event: Option<Id>, trace: Id, phase: &str, picked: &Picked, stage: &str, config_hash: &str) -> Change {
     let pick = Pick {
         id: Id::generate(),
         trace,
         time: picked.time,
         phase: phase.to_string(),
         uncertainty_s: picked.uncertainty_s,
-        provenance: Provenance::Auto { stage: PICK_STAGE.to_string(), config_hash: config_hash.to_string() },
+        provenance: Provenance::Auto { stage: stage.to_string(), config_hash: config_hash.to_string() },
+        event,
     };
     Change::SetPick { pick, revert: false }
 }
@@ -103,25 +104,33 @@ pub fn observation(project: &Project, pick: &Pick, reference: Timestamp) -> Resu
     Ok(Observation { location, speed_m_s, time, sigma_s: pick.uncertainty_s })
 }
 
+/// The traces alignment edits may touch: `event`'s members, or every trace.
+fn scope(project: &Project, event: Option<Id>) -> Vec<&squiggle_core::Trace> {
+    match event.and_then(|e| project.event(e)) {
+        Some(e) => e.members.iter().filter_map(|m| project.trace(m.trace)).collect(),
+        None => project.traces().iter().collect(),
+    }
+}
+
 /// Shifts that place each trace's first-phase arrival from `origin` at the
-/// origin time. Locked traces are left out and counted.
-pub fn moveout_changes(project: &Project, origin: &Origin) -> (Vec<Change>, usize) {
+/// origin time, in `event`. Locked traces are left out and counted.
+pub fn moveout_changes(project: &Project, event: Option<Id>, origin: &Origin) -> (Vec<Change>, usize) {
     let mut locked = 0;
     let mut changes = Vec::new();
-    for trace in project.traces() {
+    for trace in scope(project, event) {
         let location = project.sensor(trace.sensor).and_then(|s| s.location);
         let speed = project.trace_phenomenology(trace).and_then(|p| p.propagation.speed(""));
         let (Some(location), Some(speed)) = (location, speed) else {
             continue;
         };
-        if trace.is_locked() {
+        if project.is_locked(event, trace.id) {
             locked += 1;
             continue;
         }
         let offset_s = -travel_time(origin.source(), &location, speed);
         let provenance = Provenance::Auto { stage: "align.moveout".to_string(), config_hash: origin_hash(origin) };
         let alignment = Alignment { offset_s, provenance, locked: false };
-        changes.push(Change::SetAlignment { trace: trace.id, alignment: Some(alignment), revert: false });
+        changes.push(Change::SetAlignment { trace: trace.id, alignment: Some(alignment), revert: false, event });
     }
     (changes, locked)
 }
@@ -129,26 +138,28 @@ pub fn moveout_changes(project: &Project, origin: &Origin) -> (Vec<Change>, usiz
 /// Shifts that put each trace's pick on the reference trace's pick of the
 /// same phase: the reference's earliest phase when the trace has it, else the
 /// trace's earliest (onto the reference's earliest if the reference lacks that
-/// phase). Locked traces are left out and counted.
-pub fn pick_alignment_changes(project: &Project, reference: Id, traces: &[Id]) -> (Vec<Change>, usize) {
+/// phase). Picks, offsets and members are those of `event`. Locked traces are
+/// left out and counted.
+pub fn pick_alignment_changes(project: &Project, event: Option<Id>, reference: Id, traces: &[Id]) -> (Vec<Change>, usize) {
     // Where a pick is drawn: corrected time plus its trace's offset.
-    let drawn = |pick: &Pick| Some(project.pick_time(pick)?.add_seconds(project.trace(pick.trace)?.offset()));
+    let drawn = |pick: &Pick| Some(project.pick_time(pick)?.add_seconds(project.offset(event, pick.trace)));
+    let in_scope: HashSet<Id> = scope(project, event).iter().map(|t| t.id).collect();
     let earliest = |trace: Id| {
         project
-            .trace_picks(trace)
+            .event_picks(event, trace)
             .filter_map(|p| Some((drawn(p)?, p)))
             .min_by(|a, b| a.0.seconds_since(b.0).total_cmp(&0.0))
     };
-    let of_phase = |trace: Id, phase: &str| project.trace_picks(trace).find(|p| p.phase == phase).and_then(drawn);
+    let of_phase = |trace: Id, phase: &str| project.event_picks(event, trace).find(|p| p.phase == phase).and_then(drawn);
     let Some((anchor_at, anchor)) = earliest(reference) else {
         return (Vec::new(), 0);
     };
     let mut locked = 0;
     let mut changes = Vec::new();
-    for &id in traces.iter().filter(|&&id| id != reference) {
-        let Some(trace) = project.trace(id) else {
+    for &id in traces.iter().filter(|&&id| id != reference && in_scope.contains(&id)) {
+        if project.trace(id).is_none() {
             continue;
-        };
+        }
         let pair = match of_phase(id, &anchor.phase) {
             Some(at) => Some((at, anchor_at)),
             None => earliest(id).map(|(at, p)| (at, of_phase(reference, &p.phase).unwrap_or(anchor_at))),
@@ -156,14 +167,14 @@ pub fn pick_alignment_changes(project: &Project, reference: Id, traces: &[Id]) -
         let Some((at, target)) = pair else {
             continue;
         };
-        if trace.is_locked() {
+        if project.is_locked(event, id) {
             locked += 1;
             continue;
         }
-        let offset_s = trace.offset() + target.seconds_since(at);
+        let offset_s = project.offset(event, id) + target.seconds_since(at);
         let provenance = Provenance::Auto { stage: "align.picks".to_string(), config_hash: config_hash(&reference.to_string()) };
         let alignment = Alignment { offset_s, provenance, locked: false };
-        changes.push(Change::SetAlignment { trace: id, alignment: Some(alignment), revert: false });
+        changes.push(Change::SetAlignment { trace: id, alignment: Some(alignment), revert: false, event });
     }
     (changes, locked)
 }
@@ -187,6 +198,7 @@ type PickOutcome = Result<Option<Picked>, String>;
 struct PickJob {
     rows: Vec<(Id, String, String)>,
     config_hash: String,
+    event: Option<Id>,
 }
 
 struct LocateJob {
@@ -194,6 +206,7 @@ struct LocateJob {
     picks: Vec<Id>,
     reference: Timestamp,
     config_hash: String,
+    event: Option<Id>,
 }
 
 struct FitView {
@@ -202,6 +215,7 @@ struct FitView {
     /// Observation order.
     picks: Vec<Id>,
     config_hash: String,
+    event: Option<Id>,
 }
 
 #[derive(Resource)]
@@ -211,7 +225,7 @@ pub struct LocateWindows {
     settings: HashMap<PhenomenologyId, PickSettings>,
     choice: Choice,
     pick_task: Option<(PickJob, Task<Vec<PickOutcome>>)>,
-    pick_rows: Option<(Vec<PickRow>, String)>,
+    pick_rows: Option<(Vec<PickRow>, String, Option<Id>)>,
     max_depth_km: f64,
     /// Zero: from the sensor spread.
     extent_km: f64,
@@ -276,20 +290,20 @@ fn poll(windows: &mut LocateWindows, workspace: &Workspace) {
             .zip(results)
             .map(|((trace, code, phase), result)| {
                 let existing = project
-                    .trace_picks(trace)
+                    .event_picks(job.event, trace)
                     .find(|p| p.phase == phase)
                     .map(|p| (p.time, p.provenance.is_manual()));
                 let apply = matches!(result, Ok(Some(_))) && !existing.is_some_and(|e| e.1);
                 PickRow { trace, code, phase, result, existing, apply }
             })
             .collect();
-        windows.pick_rows = Some((rows, job.config_hash));
+        windows.pick_rows = Some((rows, job.config_hash, job.event));
     }
     if let Some((_, task)) = &mut windows.locate_task
         && let Some(fit) = check_ready(task)
     {
         let (job, _) = windows.locate_task.take().expect("checked above");
-        windows.fit = fit.map(|fit| FitView { fit, reference: job.reference, picks: job.picks, config_hash: job.config_hash });
+        windows.fit = fit.map(|fit| FitView { fit, reference: job.reference, picks: job.picks, config_hash: job.config_hash, event: job.event });
     }
 }
 
@@ -307,34 +321,48 @@ fn relative(project: &Project, at: Timestamp) -> String {
     }
 }
 
-/// Copies the chosen tracks' series out and picks them off the UI thread.
-/// Tracks without settings for their phenomenology are skipped.
-fn start_pick(windows: &mut LocateWindows, project: &Project, chosen: &[&Track]) {
+/// Copies the chosen tracks' series out (within `event`'s window, members
+/// only) and picks them off the UI thread. Tracks without settings for their
+/// phenomenology are skipped.
+fn start_pick(windows: &mut LocateWindows, project: &Project, chosen: &[&Track], event: Option<Id>) {
+    let window = event.and_then(|e| project.event(e));
     let mut inputs = Vec::new();
     let mut rows = Vec::new();
     for track in chosen {
         let (Some(id), Some(series), Some(trace)) = (&track.phenomenology_id, &track.series, project.trace(track.trace)) else {
             continue;
         };
+        if !track.member {
+            continue;
+        }
         let Some(&settings) = windows.settings.get(id) else {
             continue;
         };
         let phase = project.phenomenology(id).and_then(|p| p.propagation.first_phase()).unwrap_or("").to_string();
         let values = match track.kind {
-            SampleKind::Real => series.values.iter().collect(),
-            SampleKind::Complex => series.samples.series(IqComponent::Magnitude).iter().collect(),
+            SampleKind::Real => series.values.clone(),
+            SampleKind::Complex => series.samples.series(IqComponent::Magnitude),
         };
-        inputs.push(PickInput { values, rate: track.rate, start: trace.start, settings });
+        let (lo, hi) = match window {
+            Some(e) => {
+                let corrected = project.corrected_start(trace);
+                let index = |t: Timestamp| (t.seconds_since(corrected) * track.rate).clamp(0.0, values.len() as f64) as usize;
+                (index(e.start), index(e.end))
+            }
+            None => (0, values.len()),
+        };
+        let start = trace.start.add_seconds(lo as f64 / track.rate);
+        inputs.push(PickInput { values: values.range(lo, hi).collect(), rate: track.rate, start, settings });
         rows.push((track.trace, track.code.clone(), phase));
     }
     let key = format!("{:?} {:?}", windows.choice, inputs.iter().map(|i| i.settings).collect::<Vec<_>>());
     let choice = windows.choice;
     let task = AsyncComputeTaskPool::get().spawn(async move { inputs.iter().map(|i| run_pick(i, choice)).collect() });
     windows.pick_rows = None;
-    windows.pick_task = Some((PickJob { rows, config_hash: config_hash(&key) }, task));
+    windows.pick_task = Some((PickJob { rows, config_hash: config_hash(&key), event }, task));
 }
 
-fn start_locate(windows: &mut LocateWindows, usable: &[(Id, Observation)], reference: Timestamp) {
+fn start_locate(windows: &mut LocateWindows, usable: &[(Id, Observation)], reference: Timestamp, event: Option<Id>) {
     let settings = LocateSettings {
         max_depth_m: windows.max_depth_km * 1e3,
         half_extent_m: (windows.extent_km > 0.0).then_some(windows.extent_km * 1e3),
@@ -343,7 +371,7 @@ fn start_locate(windows: &mut LocateWindows, usable: &[(Id, Observation)], refer
     let key = format!("{} {} {:?}", settings.max_depth_m, windows.extent_km, usable.iter().map(|u| u.0).collect::<Vec<_>>());
     let (ids, observations): (Vec<Id>, Vec<Observation>) = usable.iter().copied().unzip();
     let task = AsyncComputeTaskPool::get().spawn(async move { locate(&observations, &settings) });
-    windows.locate_task = Some((LocateJob { picks: ids, reference, config_hash: config_hash(&key) }, task));
+    windows.locate_task = Some((LocateJob { picks: ids, reference, config_hash: config_hash(&key), event }, task));
 }
 
 fn pick_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &mut Workspace, view: &TrackView, tracks: &Query<&Track>) {
@@ -354,6 +382,9 @@ fn pick_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &mut
     let mut open = true;
     egui::Window::new("Pick").open(&mut open).default_width(560.0).show(ctx, |ui| {
         ui.weak("One onset per selected track: an STA/LTA trigger refined by AIC, on the plotted series. Automatic picks take the first phase.");
+        if view.event.is_some() {
+            ui.weak("Within the event under review: its members and window only.");
+        }
         if view.show_raw {
             ui.colored_label(WARN_COLOR, "⚠ Raw display is on: picks use unprocessed samples.");
         }
@@ -398,7 +429,7 @@ fn pick_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &mut
         let busy = windows.pick_task.is_some();
         ui.horizontal(|ui| {
             if ui.add_enabled(!present.is_empty() && !busy, egui::Button::new("Pick")).clicked() {
-                start_pick(windows, project, &chosen);
+                start_pick(windows, project, &chosen, view.event);
             }
             if busy {
                 ui.spinner();
@@ -407,7 +438,7 @@ fn pick_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &mut
         });
 
         let mut applied = false;
-        if let Some((rows, hash)) = &mut windows.pick_rows {
+        if let Some((rows, hash, event)) = &mut windows.pick_rows {
             ui.separator();
             egui::Grid::new("pick_results").striped(true).num_columns(6).show(ui, |ui| {
                 for heading in ["", "Trace", "Phase", "Onset", "STA/LTA", "σ"] {
@@ -448,7 +479,7 @@ fn pick_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &mut
             let changes: Vec<Change> = rows
                 .iter()
                 .filter(|r| r.apply)
-                .filter_map(|r| Some(pick_change(r.trace, &r.phase, r.result.as_ref().ok()?.as_ref()?, hash)))
+                .filter_map(|r| Some(pick_change(*event, r.trace, &r.phase, r.result.as_ref().ok()?.as_ref()?, PICK_STAGE, hash)))
                 .collect();
             ui.horizontal(|ui| {
                 let n = changes.len();
@@ -475,14 +506,23 @@ fn locate_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &m
     let mut changes: Option<(String, Vec<Change>)> = None;
     egui::Window::new("Locate").open(&mut open).default_width(620.0).show(ctx, |ui| {
         let project = &workspace.project;
-        let reference = project.reference.or_else(|| project.picks().iter().filter_map(|p| project.pick_time(p)).reduce(Timestamp::min));
+        let event = view.event;
+        let scoped: Vec<&Pick> = project.picks().iter().filter(|p| p.event == event).collect();
+        let reference = project.reference.or_else(|| scoped.iter().filter_map(|p| project.pick_time(p)).reduce(Timestamp::min));
+        if event.is_some() {
+            ui.weak("Picks, origin and alignment of the event under review.");
+        }
+        // A solution belongs to the event it was computed for.
+        if windows.fit.as_ref().is_some_and(|f| f.event != event) {
+            windows.fit = None;
+        }
         let fit_residual = |id: Id| {
             let view = windows.fit.as_ref()?;
             let i = view.picks.iter().position(|p| *p == id)?;
             Some(view.fit.residuals[i])
         };
 
-        if project.picks().is_empty() {
+        if scoped.is_empty() {
             ui.label("No picks yet. Use Process ▸ Pick…, or hover a row and press P (first phase) or S.");
         }
         let mut usable = Vec::new();
@@ -492,7 +532,7 @@ fn locate_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &m
                     ui.strong(heading);
                 }
                 ui.end_row();
-                let mut picks: Vec<&Pick> = project.picks().iter().collect();
+                let mut picks = scoped.clone();
                 picks.sort_by(|a, b| {
                     let t = |p: &Pick| project.pick_time(p).map_or(f64::INFINITY, |t| t.seconds_since(reference.unwrap_or(t)));
                     t(a).total_cmp(&t(b))
@@ -543,7 +583,7 @@ fn locate_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &m
             if ui.add_enabled(usable.len() >= 2 && !busy && reference.is_some(), egui::Button::new("Locate")).clicked()
                 && let Some(reference) = reference
             {
-                start_locate(windows, &usable, reference);
+                start_locate(windows, &usable, reference, event);
             }
             if busy {
                 ui.spinner();
@@ -602,7 +642,7 @@ fn locate_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &m
                             rms_s: fit.rms_s,
                             provenance: Provenance::Auto { stage: LOCATE_STAGE.to_string(), config_hash: view.config_hash.clone() },
                         };
-                        changes = Some(("Save origin".to_string(), vec![Change::SetOrigin { origin: Some(origin) }]));
+                        changes = Some(("Save origin".to_string(), vec![Change::SetOrigin { origin: Some(origin), event }]));
                     }
                 });
                 map(ui, project, view, workspace.truth_origin.map(|t| t.0));
@@ -612,9 +652,9 @@ fn locate_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &m
         ui.separator();
         ui.strong("Align across phenomenologies");
         ui.horizontal(|ui| {
-            match &project.origin {
+            match project.origin_of(event) {
                 Some(origin) => {
-                    let (moveout, locked) = moveout_changes(project, origin);
+                    let (moveout, locked) = moveout_changes(project, event, origin);
                     let n = moveout.len();
                     let response = ui
                         .add_enabled(n > 0, egui::Button::new(format!("Remove moveout ({n})")))
@@ -626,7 +666,7 @@ fn locate_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &m
                         ui.colored_label(WARN_COLOR, format!("🔒 {locked} locked kept"));
                     }
                     if ui.button("Clear origin").clicked() {
-                        changes = Some(("Clear origin".to_string(), vec![Change::SetOrigin { origin: None }]));
+                        changes = Some(("Clear origin".to_string(), vec![Change::SetOrigin { origin: None, event }]));
                     }
                 }
                 None => {
@@ -635,9 +675,9 @@ fn locate_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &m
             }
         });
         ui.horizontal(|ui| {
-            let reference = view.reference.filter(|id| project.trace_picks(*id).next().is_some());
+            let reference = view.reference.filter(|id| project.event_picks(event, *id).next().is_some());
             let chosen: Vec<Id> = selected(tracks).iter().map(|t| t.trace).collect();
-            let (aligned, locked) = reference.map_or((Vec::new(), 0), |r| pick_alignment_changes(project, r, &chosen));
+            let (aligned, locked) = reference.map_or((Vec::new(), 0), |r| pick_alignment_changes(project, event, r, &chosen));
             let n = aligned.len();
             if ui
                 .add_enabled(n > 0, egui::Button::new(format!("Align picks to ★ reference ({n})")))
@@ -748,7 +788,7 @@ mod tests {
             };
             let picked = run_pick(&input, Choice::First).unwrap().expect("a trigger");
             let phase = phenomenology.propagation.first_phase().unwrap_or("");
-            changes.push(pick_change(trace.id, phase, &picked, "test"));
+            changes.push(pick_change(None, trace.id, phase, &picked, PICK_STAGE, "test"));
 
             // Each pick lands within a sample and a half of the true first arrival.
             let code = &project.sensor(trace.sensor).unwrap().code;
@@ -785,7 +825,7 @@ mod tests {
             rms_s: 0.0,
             provenance: Provenance::Auto { stage: "test".into(), config_hash: "x".into() },
         };
-        let (changes, locked) = moveout_changes(&workspace.project, &origin);
+        let (changes, locked) = moveout_changes(&workspace.project, None, &origin);
         assert_eq!((changes.len(), locked), (synthetic::STATIONS.len(), 0));
         workspace.execute("moveout", changes).unwrap();
         let project = &workspace.project;
@@ -811,12 +851,13 @@ mod tests {
                 phase: phase.to_string(),
                 uncertainty_s: 0.01,
                 provenance: Provenance::Manual { analyst: Analyst("ana".into()), at: Timestamp::now() },
+                event: None,
             },
             revert: false,
         };
         // Seismic traces 3 and 4: P at 12 s and 13 s.
         workspace.execute("picks", vec![manual(traces[3], "P", 12.0), manual(traces[4], "S", 20.0), manual(traces[4], "P", 13.0)]).unwrap();
-        let (changes, _) = pick_alignment_changes(&workspace.project, traces[3], &traces);
+        let (changes, _) = pick_alignment_changes(&workspace.project, None, traces[3], &traces);
         assert_eq!(changes.len(), 1);
         workspace.execute("align", changes).unwrap();
         assert!((workspace.project.trace(traces[4]).unwrap().offset() + 1.0).abs() < 1e-9);

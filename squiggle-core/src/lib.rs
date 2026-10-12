@@ -9,9 +9,11 @@
 //! The project model ([`project`], [`sensor`], [`phenomenology`]) is plain
 //! data; the optional `serde` feature derives its serialisation.
 
+pub mod associate;
 pub mod axis;
 pub mod color;
 pub mod dsp;
+pub mod event;
 pub mod id;
 pub mod locate;
 pub mod lod;
@@ -33,6 +35,7 @@ pub use project::{Change, Op, Project};
 pub use dsp::{Processing, LagMethod};
 pub use lod::{Envelope, MinMax};
 pub use samples::{ChunkedSamples, Iq, IqComponent, NumberFormat, RawLayout, SampleBuf, TraceSamples};
+pub use event::{Event, EventStatus, Member};
 pub use locate::Origin;
 pub use sensor::{Alignment, Analyst, Location, Pick, Sensor, Trace, TraceSource};
 pub use squiggle::{Bounds, Point, Squiggle, Style};

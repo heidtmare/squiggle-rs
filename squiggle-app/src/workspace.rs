@@ -69,6 +69,8 @@ pub enum SyntheticEvent {
     Alignment,
     /// Known source, origin time and sensor positions.
     Located,
+    /// Several events and glitches over two minutes.
+    Swarm,
 }
 
 pub enum SampleState {
@@ -91,6 +93,8 @@ pub struct Workspace {
     pub truth: HashMap<Id, f64>,
     /// Known source and origin time; synthetic data only.
     pub truth_origin: Option<(Source, Timestamp)>,
+    /// Known events (source, origin time); synthetic data only.
+    pub truth_events: Vec<(Source, Timestamp)>,
     log: Vec<Op>,
     /// Ops a fresh project starts with; more than this and an unsaved project has edits.
     created_ops: usize,
@@ -121,6 +125,7 @@ impl Workspace {
             confirm_discard: None,
             truth: HashMap::new(),
             truth_origin: None,
+            truth_events: Vec::new(),
             created_ops: log.len(),
             log,
             store: None,
@@ -157,15 +162,16 @@ impl Workspace {
     /// either every change lands or none does.
     pub fn execute(&mut self, label: impl Into<String>, changes: Vec<Change>) -> Result<(), String> {
         let mut trial = self.project.clone();
-        let mut inverse = Vec::with_capacity(changes.len());
+        let mut groups = Vec::with_capacity(changes.len());
         for change in &changes {
-            inverse.push(trial.inverse(change).ok_or("this change cannot be undone")?);
+            groups.push(trial.inverse(change).ok_or("this change cannot be undone")?);
             trial.commit(&self.analyst, change.clone()).map_err(|e| e.to_string())?;
         }
         for change in &changes {
             self.commit(change.clone())?;
         }
-        inverse.reverse();
+        // Undo the last change first; each change's own inverse runs in order.
+        let inverse: Vec<Change> = groups.into_iter().rev().flatten().collect();
         self.undo.push(Command { label: label.into(), forward: changes, inverse });
         self.redo.clear();
         Ok(())
@@ -257,6 +263,7 @@ impl Workspace {
             confirm_discard: None,
             truth: HashMap::new(),
             truth_origin: None,
+            truth_events: Vec::new(),
             created_ops: log.len(),
             log,
             store: Some(Mutex::new(store)),
@@ -279,6 +286,11 @@ impl Workspace {
                 synthetic::write_located(&dir.join("located"))?,
                 synthetic::STATIONS.iter().map(|s| s.phenomenology).collect(),
             ),
+            SyntheticEvent::Swarm => {
+                let paths = synthetic::write_swarm(&dir.join("swarm"))?;
+                let phenomenologies = vec!["seismic"; paths.len()];
+                ("Synthetic swarm", paths, phenomenologies)
+            }
         };
         next.commit(Change::RenameProject { name: name.to_string() })?;
         let mut queue = ImportQueue::default();
@@ -294,9 +306,16 @@ impl Workspace {
         }
         let origin: Timestamp = synthetic::ORIGIN.parse().expect("valid constant");
         next.commit(Change::SetReference { reference: origin })?;
-        if event == SyntheticEvent::Located {
-            next.truth_origin = Some((synthetic::SOURCE, origin.add_seconds(synthetic::ORIGIN_TIME)));
-            return Ok(next);
+        match event {
+            SyntheticEvent::Located => {
+                next.truth_origin = Some((synthetic::SOURCE, origin.add_seconds(synthetic::ORIGIN_TIME)));
+                return Ok(next);
+            }
+            SyntheticEvent::Swarm => {
+                next.truth_events = synthetic::SWARM.iter().map(|e| (e.source(), origin.add_seconds(e.origin))).collect();
+                return Ok(next);
+            }
+            SyntheticEvent::Alignment => {}
         }
         for spec in &synthetic::SPECS {
             let sensor = next.project.sensor_by_code(&spec.code()).map(|s| s.id);
@@ -844,6 +863,7 @@ mod tests {
         queue.confirm(&mut workspace);
         let trace = workspace.project.traces()[0].id;
         let shift = |offset_s| Change::SetAlignment {
+            event: None,
             trace,
             alignment: Some(squiggle_core::Alignment {
                 offset_s,
@@ -902,8 +922,11 @@ mod tests {
         workspace.save_as(&path).unwrap();
         assert!(!workspace.is_unsaved());
 
-        // Edits after saving go straight to the file.
+        // Edits after saving go straight to the file, events included.
         workspace.commit(Change::RenameProject { name: "renamed".to_string() }).unwrap();
+        let trace = workspace.project.traces()[0].clone();
+        let event = crate::events_ui::new_event(&workspace.analyst, trace.start, trace.start.add_seconds(0.02), &[trace.id]);
+        workspace.commit(Change::AddEvent(event)).unwrap();
         let reopened = Workspace::open(&path, workspace.analyst.clone()).unwrap();
         assert_eq!(reopened.project, workspace.project);
     }

@@ -26,6 +26,7 @@ use squiggle_core::{
 };
 
 use crate::plot::line::{self, SquiggleLineMaterial};
+use crate::events_ui;
 use crate::strips;
 use crate::plot::{Plot, PlotMode, TRACK_LABEL_WIDTH};
 use crate::workspace::{SampleState, UNASSIGNED_COLOR, Workspace};
@@ -57,6 +58,11 @@ const SHIFT_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 140, 60);
 const MANUAL_PICK_COLOR: egui::Color32 = egui::Color32::WHITE;
 const AUTO_PICK_COLOR: egui::Color32 = egui::Color32::from_rgb(100, 180, 255);
 const PREDICTED_COLOR: egui::Color32 = egui::Color32::from_rgb(120, 220, 120);
+const EVENT_FILL: egui::Color32 = egui::Color32::from_rgba_premultiplied(40, 36, 10, 40);
+const EVENT_EDGE: egui::Color32 = egui::Color32::from_rgb(230, 200, 80);
+const NON_MEMBER: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 0, 0, 150);
+/// An event edge grabs within this many pixels.
+const EDGE_PX: f32 = 6.0;
 
 pub struct TracksPlugin;
 
@@ -170,9 +176,16 @@ pub struct TrackView {
     pub show_raw: bool,
     /// Trace others align to, and snap to while shifting.
     pub reference: Option<Id>,
-    /// Row whose context menu is open.
+    /// Event under review: rows show its offsets, picks and origin, and edits go to it.
+    pub event: Option<Id>,
+    /// Row whose context menu is open, and the time it opened at.
     menu_track: Option<Entity>,
+    menu_time: f64,
     drag: Option<ShiftDrag>,
+    /// ⌘/Ctrl+drag making an event: start and current time.
+    brush: Option<(f64, f64)>,
+    /// Dragging the reviewed event's start (`false`) or end edge, to a time.
+    edge: Option<(bool, f64)>,
 }
 
 impl Default for TrackView {
@@ -185,8 +198,12 @@ impl Default for TrackView {
             fit_requested: false,
             show_raw: false,
             reference: None,
+            event: None,
             menu_track: None,
+            menu_time: 0.0,
             drag: None,
+            brush: None,
+            edge: None,
         }
     }
 }
@@ -286,6 +303,8 @@ pub struct Track {
     pub predicted: Vec<Predicted>,
     /// Slant distance from the saved origin, metres.
     pub distance_m: Option<f64>,
+    /// In the event under review; always true without one.
+    pub member: bool,
     pub rate: f64,
     pub len: usize,
     pub kind: SampleKind,
@@ -390,6 +409,7 @@ struct Described {
     picks: Vec<TrackPick>,
     predicted: Vec<Predicted>,
     distance_m: Option<f64>,
+    member: bool,
 }
 
 /// Spawns, updates and despawns tracks to match the workspace's loaded traces.
@@ -398,23 +418,27 @@ fn sync_tracks(
     mut commands: Commands,
     workspace: Res<Workspace>,
     plot: Res<Plot>,
-    mut seen: Local<u64>,
+    mut seen: Local<(u64, Option<Id>)>,
     mut tracks: Query<(Entity, &mut Track)>,
     mut materials: ResMut<Assets<SquiggleLineMaterial>>,
     mut mode: ResMut<PlotMode>,
     mut view: ResMut<TrackView>,
 ) {
-    if *seen == workspace.revision() {
+    if view.event.is_some_and(|id| workspace.project.event(id).is_none()) {
+        view.event = None;
+    }
+    if *seen == (workspace.revision(), view.event) {
         return;
     }
-    *seen = workspace.revision();
+    *seen = (workspace.revision(), view.event);
     let project = &workspace.project;
+    let event = view.event;
 
     let describe = |trace: &squiggle_core::Trace| {
         let reference = project.reference.unwrap_or(trace.start);
         let phenomenology = project.trace_phenomenology(trace);
         let picks = project
-            .trace_picks(trace.id)
+            .event_picks(event, trace.id)
             .map(|p| TrackPick {
                 id: p.id,
                 phase: p.phase.clone(),
@@ -424,7 +448,7 @@ fn sync_tracks(
             .collect();
         let location = project.sensor(trace.sensor).and_then(|s| s.location);
         let (mut predicted, mut distance_m) = (Vec::new(), None);
-        if let (Some(origin), Some(location), Some(phenomenology)) = (&project.origin, location, phenomenology) {
+        if let (Some(origin), Some(location), Some(phenomenology)) = (project.origin_of(event), location, phenomenology) {
             distance_m = Some(slant_distance(origin.source(), &location));
             for (phase, speed) in phenomenology.propagation.phases() {
                 let travel = travel_time(origin.source(), &location, speed);
@@ -439,10 +463,11 @@ fn sync_tracks(
             phenomenology: phenomenology.map(|p| p.name.clone()),
             phenomenology_id: phenomenology.map(|p| p.id.clone()),
             color: phenomenology.map_or(UNASSIGNED_COLOR, |p| p.color),
-            start: project.aligned_start(trace).seconds_since(reference),
-            offset: trace.offset(),
-            locked: trace.is_locked(),
+            start: project.aligned_start(event, trace).seconds_since(reference),
+            offset: project.offset(event, trace.id),
+            locked: project.is_locked(event, trace.id),
             processing: trace.processing,
+            member: event.and_then(|e| project.event(e)).is_none_or(|e| e.member(trace.id).is_some()),
         }
     };
 
@@ -464,6 +489,7 @@ fn sync_tracks(
                 track.picks = d.picks;
                 track.predicted = d.predicted;
                 track.distance_m = d.distance_m;
+                track.member = d.member;
                 if dragging != Some(entity) {
                     track.preview = 0.0;
                 }
@@ -503,6 +529,7 @@ fn sync_tracks(
                 picks: d.picks,
                 predicted: d.predicted,
                 distance_m: d.distance_m,
+                member: d.member,
                 rate: trace.sample_rate,
                 len: samples.len(),
                 kind: samples.kind(),
@@ -712,22 +739,22 @@ fn manual(workspace: &Workspace) -> Provenance {
     Provenance::Manual { analyst: workspace.analyst.clone(), at: Timestamp::now() }
 }
 
-/// A manual alignment at `offset_s`, locked against automatic re-runs.
-pub fn shift_change(workspace: &Workspace, trace: Id, offset_s: f64) -> Change {
+/// A manual alignment at `offset_s` in `event`, locked against automatic re-runs.
+pub fn shift_change(workspace: &Workspace, event: Option<Id>, trace: Id, offset_s: f64) -> Change {
     let alignment = Alignment { offset_s, provenance: manual(workspace), locked: true };
-    Change::SetAlignment { trace, alignment: Some(alignment), revert: false }
+    Change::SetAlignment { trace, alignment: Some(alignment), revert: false, event }
 }
 
 /// A manual pick of `phase` on `track` where it is drawn at `at` seconds,
 /// replacing any pick of that phase. `None` while the trace is missing.
-fn manual_pick(workspace: &Workspace, track: &Track, phase: &str, at: f64, uncertainty_s: f64) -> Option<Change> {
+fn manual_pick(workspace: &Workspace, event: Option<Id>, track: &Track, phase: &str, at: f64, uncertainty_s: f64) -> Option<Change> {
     let project = &workspace.project;
     let trace = project.trace(track.trace)?;
     let reference = project.reference.unwrap_or(trace.start);
     // Drawn = corrected + offset; recorded = corrected − the trace's clock correction.
     let corrected = reference.add_seconds(at - track.offset);
     let correction = project.corrected_start(trace).seconds_since(trace.start);
-    let id = project.trace_picks(trace.id).find(|p| p.phase == phase).map_or_else(Id::generate, |p| p.id);
+    let id = project.event_picks(event, trace.id).find(|p| p.phase == phase).map_or_else(Id::generate, |p| p.id);
     let pick = Pick {
         id,
         trace: trace.id,
@@ -735,6 +762,7 @@ fn manual_pick(workspace: &Workspace, track: &Track, phase: &str, at: f64, uncer
         phase: phase.to_string(),
         uncertainty_s,
         provenance: manual(workspace),
+        event,
     };
     Some(Change::SetPick { pick, revert: false })
 }
@@ -791,24 +819,35 @@ fn track_menu(ui: &mut egui::Ui, track: &mut Track, view: &mut TrackView, worksp
         }
     }
 
+    if let Some(event) = view.event {
+        ui.separator();
+        let (label, add) = if track.member { ("Remove from event", false) } else { ("Add to event", true) };
+        if ui.button(label).clicked() {
+            if let Some(change) = events_ui::member_change(&workspace.project, event, track.trace, add) {
+                workspace.execute_or_report(format!("{label}: {}", track.code), vec![change]);
+            }
+            ui.close();
+        }
+    }
     ui.separator();
     let is_reference = view.reference == Some(track.trace);
     if ui.add_enabled(!is_reference, egui::Button::new("Use as alignment reference")).clicked() {
         view.reference = Some(track.trace);
         ui.close();
     }
-    let alignment = workspace.project.trace(track.trace).and_then(|t| t.alignment.clone());
+    let event = view.event;
+    let alignment = workspace.project.alignment(event, track.trace).cloned();
     if let Some(alignment) = alignment {
         let label = if alignment.locked { "Unlock offset" } else { "Lock offset" };
         if ui.button(label).on_hover_text("Locked offsets are left alone by automatic alignment").clicked() {
             let next = Alignment { provenance: manual(workspace), locked: !alignment.locked, ..alignment };
             let verb = if next.locked { "Lock" } else { "Unlock" };
-            let change = Change::SetAlignment { trace: track.trace, alignment: Some(next), revert: false };
+            let change = Change::SetAlignment { trace: track.trace, alignment: Some(next), revert: false, event };
             workspace.execute_or_report(format!("{verb} {}", track.code), vec![change]);
             ui.close();
         }
         if ui.button("Reset offset").clicked() {
-            let change = Change::SetAlignment { trace: track.trace, alignment: None, revert: false };
+            let change = Change::SetAlignment { trace: track.trace, alignment: None, revert: false, event };
             workspace.execute_or_report(format!("Reset {}", track.code), vec![change]);
             ui.close();
         }
@@ -997,8 +1036,37 @@ pub fn tracks_ui(
         }
     }
 
-    // Predicted arrivals (dashed) and picks (white manual, blue automatic).
+    // The reviewed event's window (or the one being brushed), and non-members dimmed.
     let marks = painter.with_clip_rect(area);
+    let reference = workspace.project.reference;
+    let window = view.event.and_then(|id| workspace.project.event(id)).zip(reference).map(|(e, r)| {
+        let (mut from, mut to) = (e.start.seconds_since(r), e.end.seconds_since(r));
+        match view.edge {
+            Some((false, at)) => from = at,
+            Some((true, at)) => to = at,
+            None => {}
+        }
+        (from, to)
+    });
+    // This frame's time axis, before any zoom below.
+    let time = view.time;
+    let x_at = |t: f64| area.min.x + time.x_of(t) as f32;
+    for (from, to) in window.into_iter().chain(view.brush.map(|(a, b)| (a.min(b), a.max(b)))) {
+        let span = egui::Rect::from_x_y_ranges(x_at(from)..=x_at(to), area.y_range());
+        marks.rect_filled(span, 0.0, EVENT_FILL);
+        for x in [span.min.x, span.max.x] {
+            marks.vline(x, area.y_range(), egui::Stroke::new(1.5, EVENT_EDGE));
+        }
+    }
+    if view.event.is_some() {
+        for (entity, y) in &rows {
+            if tracks.get(*entity).is_ok_and(|(_, t, _)| !t.member) {
+                marks.rect_filled(egui::Rect::from_x_y_ranges(area.x_range(), *y), 0.0, NON_MEMBER);
+            }
+        }
+    }
+
+    // Predicted arrivals (dashed) and picks (white manual, blue automatic).
     for (entity, y) in &rows {
         let Ok((_, track, _)) = tracks.get(*entity) else {
             continue;
@@ -1030,7 +1098,6 @@ pub fn tracks_ui(
             painter.text(egui::pos2(x, axis_y + 8.0), egui::Align2::CENTER_TOP, label, mono.clone(), AXIS_COLOR);
         }
     }
-    let reference = workspace.project.reference;
     let caption = match reference {
         Some(reference) => format!("seconds from\n{}", compact_time(&reference.to_string())),
         None => "seconds".to_string(),
@@ -1062,16 +1129,70 @@ pub fn tracks_ui(
     let row_at = |y: f32| rows.iter().find(|(_, r)| r.contains(y)).map(|(e, _)| *e);
     let (shift_held, alt_held) = ctx.input(|i| (i.modifiers.shift, i.modifiers.alt));
 
+    // ⌘/Ctrl+drag brushes a new event; dragging the reviewed event's edge moves it.
+    let command_held = ctx.input(|i| i.modifiers.command);
+    let pointer_time = pointer.map(|p| view.time.time_at(f64::from(p.x - area.min.x)));
+    if response.drag_started()
+        && let (Some(p), Some(at)) = (pointer, pointer_time)
+    {
+        let near = |t: f64| (x_at(t) - p.x).abs() <= EDGE_PX;
+        if command_held {
+            view.brush = Some((at, at));
+        } else if let Some((from, to)) = window.filter(|_| !shift_held) {
+            if near(from) {
+                view.edge = Some((false, from));
+            } else if near(to) {
+                view.edge = Some((true, to));
+            }
+        }
+    }
+    if response.dragged()
+        && let Some(at) = pointer_time
+    {
+        if let Some(brush) = &mut view.brush {
+            brush.1 = at;
+        }
+        if let Some(edge) = &mut view.edge {
+            edge.1 = at;
+        }
+    }
+    if response.drag_stopped() {
+        if let (Some((a, b)), Some(reference)) = (view.brush.take(), reference)
+            && (x_at(a) - x_at(b)).abs() > 3.0
+        {
+            let (from, to) = (a.min(b), a.max(b));
+            let selected: Vec<Id> = tracks.iter().filter(|(_, t, _)| t.selected).map(|(_, t, _)| t.trace).collect();
+            let members: Vec<Id> = if selected.is_empty() {
+                tracks.iter().filter(|(_, t, _)| t.drawn_start() < to && t.end() > from).map(|(_, t, _)| t.trace).collect()
+            } else {
+                selected
+            };
+            let event = events_ui::new_event(&workspace.analyst, reference.add_seconds(from), reference.add_seconds(to), &members);
+            let id = event.id;
+            if workspace.execute_or_report("New event", vec![Change::AddEvent(event)]) {
+                view.event = Some(id);
+            }
+        }
+        if let (Some((end, at)), Some((from, to)), Some(id), Some(reference)) = (view.edge.take(), window, view.event, reference) {
+            let (from, to) = if end { (from, at) } else { (at, to) };
+            let (from, to) = (from.min(to), from.max(to));
+            if let Some(change) = events_ui::window_change(&workspace.project, id, reference.add_seconds(from), reference.add_seconds(to)) {
+                workspace.execute_or_report("Resize event", vec![change]);
+            }
+        }
+    }
+
     // Shift+drag a row: shift the trace in time, snapping to correlation
     // peaks against the reference (Alt disables snapping).
     if response.drag_started()
         && shift_held
+        && !command_held
         && let Some(entity) = pointer.and_then(|p| row_at(p.y))
     {
         let snaps = snap_targets(&view, &tracks, entity, width);
         view.drag = Some(ShiftDrag { entity, raw: 0.0, snaps, snapped: None });
     }
-    if response.dragged() {
+    if response.dragged() && view.brush.is_none() && view.edge.is_none() {
         let delta = response.drag_delta();
         let px_per_s = view.time.px_per_s;
         match &mut view.drag {
@@ -1097,7 +1218,7 @@ pub fn tracks_ui(
         && let Ok((_, mut track, _)) = tracks.get_mut(drag.entity)
         && track.preview != 0.0
     {
-        let change = shift_change(&workspace, track.trace, track.offset + track.preview);
+        let change = shift_change(&workspace, view.event, track.trace, track.offset + track.preview);
         if !workspace.execute_or_report(format!("Shift {}", track.code), vec![change]) {
             track.preview = 0.0;
         }
@@ -1111,7 +1232,7 @@ pub fn tracks_ui(
             let changes: Vec<Change> = tracks
                 .iter()
                 .filter(|(_, t, _)| t.selected)
-                .map(|(_, t, _)| shift_change(&workspace, t.trace, t.offset + steps / t.rate))
+                .map(|(_, t, _)| shift_change(&workspace, view.event, t.trace, t.offset + steps / t.rate))
                 .collect();
             if !changes.is_empty() {
                 let label = format!("Nudge {} sample{}", signed(steps), if steps.abs() == 1.0 { "" } else { "s" });
@@ -1136,7 +1257,7 @@ pub fn tracks_ui(
         if let Some(phase) = key.and_then(|k| key_phase(&workspace, track, k)) {
             // A pixel at this zoom, but no finer than a sample.
             let uncertainty_s = (1.0 / track.rate).max(1.0 / px_per_s);
-            if let Some(change) = manual_pick(&workspace, track, &phase, at, uncertainty_s) {
+            if let Some(change) = manual_pick(&workspace, view.event, track, &phase, at, uncertainty_s) {
                 workspace.execute_or_report(format!("Pick {} on {}", phase_label(&phase), track.code), vec![change]);
             }
         }
@@ -1161,8 +1282,26 @@ pub fn tracks_ui(
     }
     if response.secondary_clicked() {
         view.menu_track = pointer.and_then(|p| row_at(p.y));
+        view.menu_time = pointer_time.unwrap_or_default();
     }
     response.context_menu(|ui| {
+        if let (Some(id), Some(reference)) = (view.event, reference) {
+            if ui.button("Split event here").clicked() {
+                let at = reference.add_seconds(view.menu_time);
+                match events_ui::split_changes(&workspace.project, id, at) {
+                    Some(changes) => {
+                        workspace.execute_or_report("Split event", changes);
+                    }
+                    None => workspace.error = Some("Split inside the event's window.".to_string()),
+                }
+                ui.close();
+            }
+            if ui.button("Close review").clicked() {
+                view.event = None;
+                ui.close();
+            }
+            ui.separator();
+        }
         if let Some(entity) = view.menu_track
             && let Ok((_, mut track, _)) = tracks.get_mut(entity)
         {
@@ -1261,6 +1400,7 @@ mod tests {
             picks: Vec::new(),
             predicted: Vec::new(),
             distance_m: None,
+            member: true,
             rate,
             len,
             kind: SampleKind::Real,
@@ -1332,11 +1472,11 @@ mod tests {
         let mut workspace = Workspace::synthetic(Analyst("ana".into()), SyntheticEvent::Located).unwrap();
         let trace = workspace.project.traces()[3].clone();
         let clock = ClockCorrection { offset_s: 0.2, drift_ppm: 0.0 };
-        let changes = vec![shift_change(&workspace, trace.id, 0.75), Change::SetClockCorrection { sensor: trace.sensor, clock }];
+        let changes = vec![shift_change(&workspace, None, trace.id, 0.75), Change::SetClockCorrection { sensor: trace.sensor, clock }];
         workspace.execute("setup", changes).unwrap();
         let mut t = track(100.0, 1000);
         (t.trace, t.offset) = (trace.id, 0.75);
-        let change = manual_pick(&workspace, &t, "P", 12.5, 0.01).unwrap();
+        let change = manual_pick(&workspace, None, &t, "P", 12.5, 0.01).unwrap();
         workspace.execute("pick", vec![change]).unwrap();
 
         let project = &workspace.project;
@@ -1345,7 +1485,7 @@ mod tests {
         assert!((t.drawn(corrected) - 12.5).abs() < 1e-9, "{corrected}");
         assert!(pick.provenance.is_manual());
         // A second P replaces the first.
-        let again = manual_pick(&workspace, &t, "P", 13.0, 0.01).unwrap();
+        let again = manual_pick(&workspace, None, &t, "P", 13.0, 0.01).unwrap();
         workspace.execute("again", vec![again]).unwrap();
         assert_eq!(workspace.project.picks().len(), 1);
     }

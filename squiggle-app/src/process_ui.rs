@@ -129,6 +129,7 @@ struct AlignJob {
     reference: usize,
     settings: AlignSettings,
     all_pairs: bool,
+    event: Option<Id>,
 }
 
 struct ResultRow {
@@ -155,6 +156,7 @@ struct AlignResults {
     stage: String,
     config_hash: String,
     analysis_rate: Option<f64>,
+    event: Option<Id>,
 }
 
 #[derive(Resource, Default)]
@@ -305,11 +307,13 @@ pub(crate) fn config_hash(text: &str) -> String {
     format!("{hash:016x}")
 }
 
-fn start_alignment(windows: &mut ProcessWindows, chosen: &[&Track], reference: &Track) {
+fn start_alignment(windows: &mut ProcessWindows, chosen: &[&Track], reference: &Track, event: Option<Id>) {
     let a = &windows.align;
     let settings = AlignSettings { method: a.method, from: a.from, to: a.to, max_lag_s: a.max_lag_s, max_samples: ALIGN_SAMPLES };
     let mut members: Vec<&Track> = vec![reference];
-    members.extend(chosen.iter().copied().filter(|t| t.trace != reference.trace && t.phenomenology_id == reference.phenomenology_id));
+    members.extend(
+        chosen.iter().copied().filter(|t| t.trace != reference.trace && t.member && t.phenomenology_id == reference.phenomenology_id),
+    );
     // Resampler support, at the lowest analysis rate any pair can use.
     let lowest = members.iter().map(|t| t.rate).fold(f64::INFINITY, f64::min);
     let span = a.to - a.from + 2.0 * a.max_lag_s;
@@ -335,7 +339,7 @@ fn start_alignment(windows: &mut ProcessWindows, chosen: &[&Track], reference: &
         align(&channels, 0, &settings, all_pairs)
     });
     windows.results = None;
-    windows.task = Some((AlignJob { traces, reference: 0, settings, all_pairs }, task));
+    windows.task = Some((AlignJob { traces, reference: 0, settings, all_pairs, event }, task));
 }
 
 fn poll_alignment(windows: &mut ProcessWindows, workspace: &Workspace) {
@@ -400,6 +404,7 @@ fn poll_alignment(windows: &mut ProcessWindows, workspace: &Workspace) {
         stage: format!("align.{}", if s.method == LagMethod::GccPhat { "gcc-phat" } else { "xcorr" }),
         config_hash: config_hash(&key),
         analysis_rate,
+        event: job.event,
     });
 }
 
@@ -478,7 +483,9 @@ fn align_window(
             }
             let mut members = 0;
             for track in chosen.iter().filter(|t| t.trace != reference.trace) {
-                if track.phenomenology_id.is_none() {
+                if !track.member {
+                    ui.colored_label(WARN_COLOR, format!("{}: not in the event, skipped", track.code));
+                } else if track.phenomenology_id.is_none() {
                     ui.colored_label(WARN_COLOR, format!("{}: unassigned, skipped", track.code));
                 } else if track.phenomenology_id != reference.phenomenology_id {
                     ui.colored_label(
@@ -502,7 +509,7 @@ fn align_window(
                 && let Some(reference) = reference
             {
                 view.reference = Some(reference.trace);
-                start_alignment(windows, &chosen, reference);
+                start_alignment(windows, &chosen, reference, view.event);
             }
             if busy {
                 ui.spinner();
@@ -581,7 +588,7 @@ fn align_window(
                     let offset_s = r.offset - r.delay?;
                     let provenance = Provenance::Auto { stage: results.stage.clone(), config_hash: results.config_hash.clone() };
                     let alignment = Alignment { offset_s, provenance, locked: false };
-                    Some(Change::SetAlignment { trace: r.trace, alignment: Some(alignment), revert: false })
+                    Some(Change::SetAlignment { trace: r.trace, alignment: Some(alignment), revert: false, event: results.event })
                 })
                 .collect();
             ui.horizontal(|ui| {
