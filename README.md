@@ -205,10 +205,6 @@ coloured by phenomenology.
 - **SigMF**: real or complex, any `core:datatype`; select either file of the
   pair. Integer types are scaled to ±1. Both files are hashed.
   `core:geolocation` sets the sensor location.
-
-A location from the file is set on a sensor that has none. Edit locations
-(latitude, longitude in degrees, elevation in metres) in **Project ▸
-Sensors…**.
 - **Raw binary**: any file no reader recognises. The import dialog asks for
   its layout (number format, byte order, real or I/Q, interleaved channels,
   header bytes, scale); the layout is stored with each trace, and the last
@@ -216,6 +212,10 @@ Sensors…**.
 
 Complex (I/Q) traces plot magnitude by default; right-click the row for
 phase, I or Q.
+
+A location from the file is set on a sensor that has none. Edit locations
+(latitude, longitude in degrees, elevation in metres) in **Project ▸
+Sensors…**.
 
 **Phenomenology.** Built-ins: seismic, acoustic, infrasound, RF, EMP. Each
 has quantity, units, sample kind, propagation (constant speed, phases, or
@@ -594,10 +594,10 @@ cargo run -p squiggle-io --release --bin squiggle-stream -- <files…> [--port 1
   stream trace in the project. Every 10 s and when the feed stops, the
   project records the length and the BLAKE3 of the bytes so far
   (`ExtendTrace`); a reopened project loads exactly that much, so samples
-  written after the last checkpoint are ignored, not refused. A
-  channel's sensor is matched by code (added with its position when new); a new sensor's suggested
-  phenomenology (from its channel code) waits for **Assign the suggested
-  phenomenologies**, so it is recorded but not processed until then.
+  written after the last checkpoint are ignored, not refused. A channel's
+  sensor is matched by code (added with its position when new); a new
+  sensor's suggested phenomenology (from its channel code) waits for
+  **Assign the suggested phenomenologies**, so it is recorded but not processed until then.
 - **Display.** Tracks grow as samples arrive: unprocessed series and their
   min/max pyramid are extended in place; processed ones are rebuilt at most
   once a second. **Follow live** keeps the newest sample at the right edge.
@@ -720,6 +720,7 @@ squiggle-app/    the Bevy application
   src/plot/      camera, input, meshing, overlay
   src/ui.rs      menu bar, toolbar, sidebar (egui)
   src/showcase.rs  transform demo scenes and their checks
+  src/demo.rs      demo squiggle and command-line options
 ```
 
 `squiggle-core` has no dependencies at all — the FFT is implemented there —
@@ -768,89 +769,34 @@ readback, and the result is exact.
 ## Testing
 
 ```sh
-cargo test          # the whole workspace
+cargo test                                   # the whole workspace
+cargo test -p squiggle-core                  # one crate
+cargo test -p squiggle-models --features onnx
 ```
 
-`squiggle-core`'s tests cover the projection round trip, culling, zoom
-anchoring, tick placement under pan and zoom, label formatting, bounds
-maintenance, hit-testing, and the transforms: FFT against DFT, exact
-forward-inverse round trips, amplitude scaling, STFT frame placement, and
-wavelet orthonormality and reconstruction, plus LOD ranges and decimation
-against brute force (one chunk or many) and time-axis ticks. DSP tests check
-Butterworth responses against −3 dB corners, chunked against whole filtering
-and resampling, zero-phase pulses, alias rejection, spectrogram bins, delay
-recovery (known shifts, sub-sample, gaps, noise confidence), the least-squares
-solve, and known delays at mixed rates recovered within one sample. Picker
-tests check STA/LTA forms (streamed equals whole), triggers, AIC and onsets
-within two samples; locator tests recover sources from exact arrivals, with
-mixed phenomenologies anchored on the fastest. Project tests cover locks,
-reverts, processing validation, picks (per-phase replacement, manual locks,
-clock correction), sensor locations, and events (per-event alignment, origin
-and picks, validation, removal with undo). Detector tests check each detector
-finds each burst once and that chunked runs (1, 7, 4096, 65 537 samples) match
-whole runs exactly; association tests separate events from S phases and
-noise, drop a wrong arrival by residual, attach slow arrivals only where
-predicted, and refuse too few sensors. Feature tests check analytic signals:
-a sine's peak, RMS, zero crossings, kurtosis (1.5), dominant frequency and
-flatness; white noise's kurtosis (3) and flatness; a burst's onset, decay
-constant and duration; a two-tone band ratio and wavelet level; a plane
-wave's speed and back-azimuth. Taxonomy, rules and label/prediction undo
-have their own tests.
-`squiggle-io` tests each reader on synthesised files (Steim1/2 round trips,
-both SAC byte orders, SigMF pairs, raw layouts), record merging with gaps,
-source chunking, change detection, and Parquet tables with nulls and
-metadata, read back with their hashes checked, and safetensors windows,
-stream frames round-tripping real and I/Q channels, a replay over TCP,
-refused bad and truncated feeds, and recordings reloading to their
-checkpoint; two sync clients sharing a project over TCP (forged ops refused,
-a restarted server keeping it), blobs round-tripping and refused when their
-hash is wrong, and a stream recording sharing only its checkpointed bytes.
-Core sync tests merge different fields, keep the later edit of a plain field
-whichever arrives first, raise conflicts on reviewed events and on ops that
-no longer apply, and rebase pending ops. `squiggle-app` tests the mesh
-builder's topology, import validation, LOD bucketing, undo/redo through the
-log, the synthetic events, manual pick placement, moveout and pick alignment,
-argument parsing, event split, merge and edit rules, saving events, the M4
-self-check (pick and locate the synthetic located event within tolerance) and
-the M5 self-check (detect the swarm at known recall and precision, chunked
-and whole runs identical, re-runs keeping reviewed events) and the M6
-self-check (the mixed scene's earthquakes and explosions separated by each
-discriminant and all classified correctly; queue order, accept and undo;
-dataset classes, noise and subtype paths) and the M7 self-check (label the
-mixed scene, export, train logistic and forest packages, import them, and
-get exactly the trainer's probabilities in the app; analyst agreement;
-disabled models skipped; an edited package refused) and the M8 self-check
-(detect and label the 40-event catalogue, export waveform windows, train a
-late-fusion waveform CNN and an early-fusion spectrogram CNN, get the
-trainer's probabilities exactly in the app, classify the held-out mixed scene
-with every sensor, without infrasound and without seismic; a zero-weight
-model leaves the ensemble alone) and the M9 self-check (the families scene:
-STA/LTA misses the weak swarm repeats, templates from one event per family
-and the matched filter find every repeat once, reviewed events are not
-detected again, templates vote every repeat's family, an offline cluster
-package recovers the families (adjusted Rand ≥ 0.8) and assigns events in
-the app as in the trainer, a cluster relabels in bulk and undoes, and
-agreement is tracked per model) and the Phase 10 self-check (the swarm and
-the families, with templates and matched filters, fed in half-second chunks
-through streaming detection give exactly the events of detecting the whole
-files, each due event closing before the feed ends; a served replay is
-recorded, checkpointed and reloads sample for sample) and the Phase 11
-self-check (two analysts share a project through a server, the second on a
-"machine" without the trace file, which arrives through the blob store; both
-edit offline, sync, and end with identical logs and projects; the clashing
-review of the same event is held as a conflict, survives a reopen, and once
-settled syncs to both; edits made during a sync are kept). Growing series match
-ones built whole.
-`squiggle-models` tests each classifier on Gaussian blobs, seeded
-determinism, median fill and standardization, stratified folds, scores,
-package round trips with tampered weights and mismatched features refused,
-both fusions classifying two-branch data with either branch missing,
-required branches abstaining, safetensors round trips, spectrogram bins,
-and (`--features onnx`) an ONNX graph built in the test, the Jacobi
-eigensolver, and DBSCAN recovering blobs with an outlier and assigning new
-points. Core tests also cover template matching (a repeat picked 0.2 s late
-matches its template at its lag; too few sensors or noise do not vote), and
-the matched filter finding weak repeats at their onsets, chunked runs equal
-to whole ones.
-`squiggle-train` tests training every kind, CNNs on written windows, leaf
-and top levels, noise and feature selection on a written dataset.
+Everything is checked against signals with a known answer, so nothing needs
+a screen or external data.
+
+| Crate | Covers |
+| --- | --- |
+| `squiggle-core` | Projection, culling, zoom anchoring, ticks and labels, bounds, hit-testing. Transforms: FFT vs DFT, inverse round trips, amplitude scaling, STFT frames, wavelet reconstruction. LOD vs brute force. DSP: Butterworth corners, zero-phase, resampling and alias rejection, delay recovery and the least-squares solve. Picker, locator, detectors, association, features, rules, templates and matched filter. Project op log: locks, picks, events, undo. Sync merge: per-field, later edit wins, conflicts on judgements and stale ops, rebasing pending ops. |
+| `squiggle-io` | Every reader on synthesised files, record merging and gaps, source chunking, change detection, Parquet and safetensors round trips, stream frames, TCP replay, bad feeds refused, recordings reloading to their checkpoint. Two sync clients over TCP (forged ops refused, server restarts), blob hashes checked, recordings shared to their checkpoint. |
+| `squiggle-models` | Each classifier on Gaussian blobs, determinism, preprocessing, folds, package round trips (tampered weights refused), both CNN fusions with branches missing, ONNX, PCA and DBSCAN. |
+| `squiggle-train` | Training every model kind, CNNs on written windows, label levels, noise and feature selection. |
+| `squiggle-app` | Mesh topology, import validation, undo/redo through the log, argument parsing, event edits, and the end-to-end self-checks below. |
+
+Streamed and chunked runs (detection, filtering, LOD) are tested to match
+whole runs exactly.
+
+**End-to-end self-checks** (`squiggle-app`), one per synthetic scene:
+
+| Scene | Checks |
+| --- | --- |
+| `--located` | Picks and location within tolerance of truth |
+| `--swarm` | Detection at known recall and precision; reviewed events survive re-runs |
+| `--mixed` | Each discriminant separates earthquakes from explosions; all classified correctly; queue, accept, undo; dataset classes |
+| `--mixed` + trainer | Logistic and forest packages give the trainer's exact probabilities in the app; edited packages refused |
+| `--catalogue` | Late- and early-fusion CNNs classify the held-out mixed scene with every sensor, without infrasound and without seismic |
+| `--families` | Matched filter finds the weak repeats STA/LTA misses; templates vote families; clusters recover them (adjusted Rand ≥ 0.8) and relabel in bulk |
+| Live | Swarm and families fed in half-second chunks give exactly the events of whole files; a served replay records and reloads sample for sample |
+| Shared | Two analysts, one missing the trace file, edit offline and sync to identical projects; a clashing review is held as a conflict, survives a reopen and syncs once settled |
