@@ -19,6 +19,7 @@ pub mod classify;
 pub mod id;
 pub mod locate;
 pub mod lod;
+pub mod model;
 pub mod phenomenology;
 pub mod project;
 pub mod samples;

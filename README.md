@@ -36,7 +36,11 @@ them through Fourier and wavelet transforms without leaving the plot.
   (P/S ratio, spectral ratio, first motion, depth, coupled air and EM
   arrivals); a transparent rules classifier; an extensible label taxonomy
   seeded with earthquake, explosion and other; a review queue ordered by
-  uncertainty; training datasets exported as Parquet.
+  uncertainty and model disagreement; training datasets exported as Parquet.
+- **Offline models.** `squiggle-train` fits logistic regression, linear SVM,
+  kNN, a decision tree or a random forest to an exported dataset and writes a
+  checksummed model package; the app imports packages and runs inference
+  only, recording each model's prediction on every event.
 - **Spectrogram strips** per row, two-sided for I/Q.
 - **Independent axis zoom.** Zoom x and y together or separately, anchored on
   the point under the cursor — waveform axes rarely share a unit.
@@ -405,6 +409,52 @@ high-frequency compressional P, weak S, an infrasound arrival). Detect with
 defaults finds all ten, explosions with their infrasound; Classify labels all
 ten correctly at 95 %.
 
+## Models
+
+Training is offline, in Rust, outside the app:
+
+```sh
+cargo run -p squiggle-train --release -- <dataset-dir> --out <package-dir> \
+    [--model logistic|svm|knn|tree|forest] [--name n] [--version n] \
+    [--level leaf|top] [--no-noise] [--features a,b] [--seed n] [--folds n] \
+    [--predictions events.csv]
+```
+
+It reads an exported dataset (checking its hashes), trains on the labelled
+event features (rejected events as `noise` unless `--no-noise`; `--level top`
+trains on each label's root ancestor), reports stratified k-fold accuracy,
+log loss and confusion, and writes a package:
+
+- `spec.toml` (`heidtmare.squiggle.model/1`): id
+  `heidtmare.squiggle.model/<name>@<version>`, kind, input feature set,
+  feature names and the feature settings the dataset was computed with,
+  preprocessing, output labels and taxonomy version, hyperparameters,
+  training project, dataset hash, class counts, fit and cross-validated
+  scores, and the blake3 of the weights.
+- `model.json`: preprocessing (median fill of missing values, then
+  standardization) and weights.
+
+The models are in `squiggle-models`, shared by trainer and app: pure Rust,
+seeded and deterministic, each giving class probabilities (SVM margins
+through a softmax with a fitted scale; kNN inverse-distance votes; tree leaf
+frequencies; forest averages).
+
+**Events ▸ Models…** imports a package folder, enables or disables models,
+and shows labels, training size, cross-validated accuracy (confusion on
+hover) and how often analysts agree (reviewed labels at or below the
+model's top label; rejected events against `noise`). The project records each
+package's path and hash (undoable); a package that changed on disk, or whose
+labels the project lacks, is refused, and one trained under another
+taxonomy version is flagged. **Classify** then replaces each event's
+predictions with the rules' and every enabled model's, each model computing
+features with its own recorded settings. The catalogue shows the consensus;
+the queue ranks events where models disagree first. Accepting a `noise`
+consensus rejects the event.
+
+To try it: `--mixed`, Detect, Classify, accept or label all ten events,
+Export dataset, run `squiggle-train` on the folder, then Models ▸ Import
+package and Classify again.
+
 ## Transforms
 
 The **Transform** menu turns each selected squiggle into new ones, added to
@@ -450,6 +500,8 @@ cargo run -p squiggle-app --release -- --demo fourier --screenshot fourier.png
 ```
 squiggle-core/   model, project op log, time, samples, LOD, transforms, DSP; no dependencies (optional serde)
 squiggle-io/     readers (miniSEED, SAC, SigMF, WAV, CSV, raw), sources, SQLite project store, Parquet datasets
+squiggle-models/ classical classifiers, preprocessing, cross-validation, model packages
+squiggle-train/  offline training CLI: dataset in, model package out
 squiggle-app/    the Bevy application
   src/workspace.rs   open project, async file I/O
   src/tracks.rs      stacked tracks: LOD meshes, time axis, labels, shifting
@@ -458,6 +510,7 @@ squiggle-app/    the Bevy application
   src/locate_ui.rs   pick and locate windows, alignment across phenomenologies
   src/events_ui.rs   detection, association, catalogue, event edits
   src/classify_ui.rs features, rules, labels, review queue, dataset export
+  src/models_ui.rs   model registry and manager
   src/synthetic.rs   synthetic alignment, located, swarm and mixed scenes
   src/project_ui.rs  import, sensor and phenomenology windows
   assets/shaders/squiggle_line.wgsl   screen-space polyline expansion
@@ -543,7 +596,7 @@ have their own tests.
 `squiggle-io` tests each reader on synthesised files (Steim1/2 round trips,
 both SAC byte orders, SigMF pairs, raw layouts), record merging with gaps,
 source chunking, change detection, and Parquet tables with nulls and
-metadata. `squiggle-app` tests the mesh
+metadata, read back with their hashes checked. `squiggle-app` tests the mesh
 builder's topology, import validation, LOD bucketing, undo/redo through the
 log, the synthetic events, manual pick placement, moveout and pick alignment,
 argument parsing, event split, merge and edit rules, saving events, the M4
@@ -552,4 +605,12 @@ the M5 self-check (detect the swarm at known recall and precision, chunked
 and whole runs identical, re-runs keeping reviewed events) and the M6
 self-check (the mixed scene's earthquakes and explosions separated by each
 discriminant and all classified correctly; queue order, accept and undo;
-dataset classes, noise and subtype paths).
+dataset classes, noise and subtype paths) and the M7 self-check (label the
+mixed scene, export, train logistic and forest packages, import them, and
+get exactly the trainer's probabilities in the app; analyst agreement;
+disabled models skipped; an edited package refused).
+`squiggle-models` tests each classifier on Gaussian blobs, seeded
+determinism, median fill and standardization, stratified folds, scores, and
+package round trips with tampered weights and mismatched features refused.
+`squiggle-train` tests training every kind, leaf and top levels, noise and
+feature selection on a written dataset.

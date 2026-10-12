@@ -9,6 +9,7 @@ use crate::dsp::Processing;
 use crate::event::{Event, EventStatus, Prediction};
 use crate::id::Id;
 use crate::locate::Origin;
+use crate::model::ModelRef;
 use crate::phenomenology::{self, Phenomenology, PhenomenologyId};
 use crate::sensor::{Alignment, Analyst, Assignment, ClockCorrection, Location, Pick, Provenance, Sensor, Trace};
 use crate::taxonomy::{self, Label, LabelId, Taxonomy};
@@ -85,6 +86,9 @@ pub enum Change {
     RemoveLabel { label: LabelId },
     /// Replaces the event's predictions; leaves its status alone.
     SetPredictions { event: Id, predictions: Vec<Prediction> },
+    /// Adds or replaces an imported model with this id.
+    SetModel(ModelRef),
+    RemoveModel { model: String },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -112,6 +116,7 @@ pub enum ApplyError {
     InvalidEvent(String),
     UnknownLabel(LabelId),
     InvalidLabel(String),
+    UnknownModel(String),
 }
 
 impl fmt::Display for ApplyError {
@@ -140,6 +145,7 @@ impl fmt::Display for ApplyError {
             Self::InvalidEvent(why) => write!(f, "invalid event: {why}"),
             Self::UnknownLabel(id) => write!(f, "no label {id}"),
             Self::InvalidLabel(why) => write!(f, "invalid label: {why}"),
+            Self::UnknownModel(id) => write!(f, "no model {id}"),
         }
     }
 }
@@ -159,6 +165,7 @@ pub struct Project {
     pub origin: Option<Origin>,
     events: Vec<Event>,
     taxonomy: Taxonomy,
+    models: Vec<ModelRef>,
 }
 
 impl Project {
@@ -380,6 +387,14 @@ impl Project {
                 self.taxonomy.version += 1;
             }
             Change::SetPredictions { event, predictions } => self.event_mut(*event)?.predictions = predictions.clone(),
+            Change::SetModel(model) => match self.models.iter_mut().find(|m| m.id == model.id) {
+                Some(existing) => *existing = model.clone(),
+                None => self.models.push(model.clone()),
+            },
+            Change::RemoveModel { model } => {
+                let index = self.models.iter().position(|m| &m.id == model).ok_or_else(|| ApplyError::UnknownModel(model.clone()))?;
+                self.models.remove(index);
+            }
         }
         Ok(())
     }
@@ -468,12 +483,25 @@ impl Project {
             Change::SetPredictions { event, .. } => {
                 one(self.event(*event).map(|e| Change::SetPredictions { event: *event, predictions: e.predictions.clone() }))
             }
+            Change::SetModel(model) => one(Some(match self.model(&model.id) {
+                Some(old) => Change::SetModel(old.clone()),
+                None => Change::RemoveModel { model: model.id.clone() },
+            })),
+            Change::RemoveModel { model } => one(self.model(model).map(|m| Change::SetModel(m.clone()))),
             _ => None,
         }
     }
 
     pub fn taxonomy(&self) -> &Taxonomy {
         &self.taxonomy
+    }
+
+    pub fn models(&self) -> &[ModelRef] {
+        &self.models
+    }
+
+    pub fn model(&self, id: &str) -> Option<&ModelRef> {
+        self.models.iter().find(|m| m.id == id)
     }
 
     /// Seed labels for a project saved before labels existed.
@@ -694,6 +722,28 @@ mod tests {
             project.commit(&analyst(), change).unwrap();
         }
         assert!(project.taxonomy().get(&quarry.id).is_none());
+    }
+
+    #[test]
+    fn models_are_referenced_and_undo() {
+        let (mut project, _) = Project::create("p", &analyst());
+        let model = ModelRef { id: "m@1".into(), path: "/m".into(), hash: "h".into(), enabled: true };
+        let undo_add = project.inverse(&Change::SetModel(model.clone())).unwrap();
+        project.commit(&analyst(), Change::SetModel(model.clone())).unwrap();
+        let disabled = ModelRef { enabled: false, ..model.clone() };
+        let undo_disable = project.inverse(&Change::SetModel(disabled.clone())).unwrap();
+        project.commit(&analyst(), Change::SetModel(disabled)).unwrap();
+        assert_eq!(project.models().len(), 1);
+        assert!(!project.models()[0].enabled);
+        for change in undo_disable {
+            project.commit(&analyst(), change).unwrap();
+        }
+        assert_eq!(project.model("m@1"), Some(&model));
+        for change in undo_add {
+            project.commit(&analyst(), change).unwrap();
+        }
+        assert!(project.models().is_empty());
+        assert!(matches!(project.commit(&analyst(), Change::RemoveModel { model: "m@1".into() }), Err(ApplyError::UnknownModel(_))));
     }
 
     #[test]
