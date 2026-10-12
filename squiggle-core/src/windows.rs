@@ -60,22 +60,25 @@ pub fn windows(traces: &[TraceData], event: &EventData, specs: &[WindowSpec]) ->
     specs.iter().map(|spec| branch(traces, event, spec)).collect()
 }
 
-fn branch(traces: &[TraceData], event: &EventData, spec: &WindowSpec) -> Windows {
-    let predicted = |trace: &TraceData| {
+/// Onset of trace `i` in `event`: its first pick, else the first phase
+/// predicted from the origin, else the window start for a member.
+pub fn onset(traces: &[TraceData], event: &EventData, i: usize) -> Option<f64> {
+    let first_pick = event.picks.iter().filter(|p| p.0 == i).map(|p| p.2).min_by(f64::total_cmp);
+    let predicted = || {
         let origin = event.origin?;
+        let trace = traces.get(i)?;
         Some(origin.time + travel_time(origin.source, trace.location.as_ref()?, trace.propagation.speed("")?))
     };
-    let first_pick = |i: usize| event.picks.iter().filter(|p| p.0 == i).map(|p| p.2).min_by(f64::total_cmp);
+    first_pick.or_else(predicted).or_else(|| event.members.contains(&i).then_some(event.start))
+}
+
+fn branch(traces: &[TraceData], event: &EventData, spec: &WindowSpec) -> Windows {
     // (member first, onset, trace)
     let mut chosen: Vec<(bool, f64, usize)> = traces
         .iter()
         .enumerate()
         .filter(|(_, t)| t.phenomenology == spec.phenomenology)
-        .filter_map(|(i, t)| {
-            let member = event.members.contains(&i);
-            let onset = first_pick(i).or_else(|| predicted(t)).or_else(|| member.then_some(event.start))?;
-            Some((member, onset, i))
-        })
+        .filter_map(|(i, _)| Some((event.members.contains(&i), onset(traces, event, i)?, i)))
         .collect();
     chosen.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)));
     chosen.truncate(spec.max_traces);

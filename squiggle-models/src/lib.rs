@@ -4,6 +4,7 @@
 //! gives the same probabilities in either.
 
 pub mod classical;
+pub mod cluster;
 pub mod deep;
 pub mod metrics;
 #[cfg(feature = "onnx")]

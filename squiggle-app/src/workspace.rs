@@ -75,6 +75,8 @@ pub enum SyntheticEvent {
     Mixed,
     /// A longer, varied run of the same, for training models.
     Catalogue,
+    /// Repeating sources in four families, some repeats weak.
+    Families,
 }
 
 pub enum SampleState {
@@ -101,6 +103,8 @@ pub struct Workspace {
     pub truth_events: Vec<(Source, Timestamp)>,
     /// Known class of each of `truth_events`, when it has one.
     pub truth_labels: Vec<LabelId>,
+    /// Known family of each of `truth_events`, when it has one.
+    pub truth_families: Vec<usize>,
     log: Vec<Op>,
     /// Ops a fresh project starts with; more than this and an unsaved project has edits.
     created_ops: usize,
@@ -133,6 +137,7 @@ impl Workspace {
             truth_origin: None,
             truth_events: Vec::new(),
             truth_labels: Vec::new(),
+            truth_families: Vec::new(),
             created_ops: log.len(),
             log,
             store: None,
@@ -272,6 +277,7 @@ impl Workspace {
             truth_origin: None,
             truth_events: Vec::new(),
             truth_labels: Vec::new(),
+            truth_families: Vec::new(),
             created_ops: log.len(),
             log,
             store: Some(Mutex::new(store)),
@@ -314,6 +320,12 @@ impl Workspace {
                 let (paths, phenomenologies) = written.into_iter().unzip();
                 ("Synthetic training catalogue", paths, phenomenologies)
             }
+            SyntheticEvent::Families => {
+                let (events, _) = synthetic::families();
+                let written = synthetic::write_mixed_events(&dir.join("families"), &events, synthetic::mixed_duration(&events))?;
+                let (paths, phenomenologies) = written.into_iter().unzip();
+                ("Synthetic event families", paths, phenomenologies)
+            }
         };
         next.commit(Change::RenameProject { name: name.to_string() })?;
         let mut queue = ImportQueue::default();
@@ -338,13 +350,29 @@ impl Workspace {
                 next.truth_events = synthetic::SWARM.iter().map(|e| (e.source(), origin.add_seconds(e.origin))).collect();
                 return Ok(next);
             }
-            SyntheticEvent::Mixed | SyntheticEvent::Catalogue => {
-                let catalogue;
-                let events: &[synthetic::MixedEvent] = if event == SyntheticEvent::Mixed {
-                    &synthetic::MIXED
-                } else {
-                    catalogue = synthetic::catalogue(synthetic::CATALOGUE_SEED, synthetic::CATALOGUE_EVENTS);
-                    &catalogue
+            SyntheticEvent::Mixed | SyntheticEvent::Catalogue | SyntheticEvent::Families => {
+                let generated;
+                let events: &[synthetic::MixedEvent] = match event {
+                    SyntheticEvent::Mixed => &synthetic::MIXED,
+                    SyntheticEvent::Catalogue => {
+                        generated = synthetic::catalogue(synthetic::CATALOGUE_SEED, synthetic::CATALOGUE_EVENTS);
+                        &generated
+                    }
+                    _ => {
+                        let (events, families) = synthetic::families();
+                        next.truth_families = families;
+                        generated = events;
+                        // A subtype per family, ready for labelling.
+                        for family in &synthetic::FAMILIES {
+                            next.commit(Change::DefineLabel(squiggle_core::Label {
+                                id: LabelId::new(family.name.replace(' ', "_")),
+                                name: family.name.to_string(),
+                                parent: Some(LabelId::new(family.class.label())),
+                                expects: Vec::new(),
+                            }))?;
+                        }
+                        &generated
+                    }
                 };
                 next.truth_events = events.iter().map(|e| (e.source(), origin.add_seconds(e.origin))).collect();
                 next.truth_labels = events.iter().map(|e| LabelId::new(e.class.label())).collect();

@@ -2,7 +2,8 @@
 //!
 //! Detection streams each track's plotted series through its phenomenology's
 //! detector in chunks, as a live feed would, refines each trigger to an onset
-//! by AIC, and associates onsets across traces into candidate events, located
+//! by AIC, adds matched-filter onsets from the template library (sensors with
+//! templates), and associates onsets across traces into candidate events, located
 //! when enough members have positions. Applying replaces automatic events;
 //! reviewed and rejected ones are kept. Any analyst edit to an automatic
 //! event marks it reviewed.
@@ -13,7 +14,8 @@ use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures::check_ready};
 use bevy_egui::{EguiContexts, egui};
 use squiggle_core::associate::{AssociateSettings, Candidate, associate, Arrival};
-use squiggle_core::dsp::{DetectorSpec, detect, refine};
+use squiggle_core::dsp::{DetectorSpec, MatchedSpec, detect, matched, refine};
+use squiggle_core::template::TemplateTrace;
 use squiggle_core::locate::surface_distance;
 use squiggle_core::sensor::Provenance;
 use squiggle_core::{
@@ -58,6 +60,9 @@ pub struct DetectInput {
     pub location: Option<Location>,
     /// Spread of the phenomenology's phases at the association radius.
     pub coda_s: f64,
+    /// Library templates of this sensor, for the matched filter.
+    pub templates: Vec<TemplateTrace>,
+    pub matched: MatchedSpec,
 }
 
 impl DetectInput {
@@ -82,9 +87,22 @@ impl DetectInput {
             speed_m_s: phenomenology.propagation.speed(""),
             location: project.sensor(trace.sensor).and_then(|s| s.location),
             coda_s: coda_s.max(0.0),
+            templates: Vec::new(),
+            matched: MatchedSpec::default(),
         })
     }
+
+    /// Adds a matched filter on the library's templates of this sensor.
+    pub fn with_templates(mut self, project: &Project, spec: MatchedSpec) -> Self {
+        self.templates = project.templates().iter().flat_map(|t| &t.traces).filter(|t| t.sensor == self.sensor).cloned().collect();
+        self.matched = spec;
+        self
+    }
 }
+
+/// Matched-filter onsets this close to a detector's are the same arrival;
+/// detector onsets within the template span after one are its later phases.
+const SAME_ONSET_S: f64 = 0.5;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Detection {
@@ -128,6 +146,32 @@ pub fn run_detection(inputs: &[DetectInput], settings: &AssociateSettings, chunk
             }
             Err(error) => errors.push((input.trace, error)),
         }
+        if input.templates.is_empty() {
+            continue;
+        }
+        let templates: Vec<&TemplateTrace> = input.templates.iter().collect();
+        match matched(&templates, input.rate, &input.matched, &input.values, chunk) {
+            Ok(triggers) => {
+                let step = (input.rate / templates.iter().map(|t| t.rate).fold(0.0, f64::max)).floor().max(1.0) / input.rate;
+                let span = input.matched.length_s;
+                for trigger in triggers {
+                    let offset = trigger.on as f64 / input.rate;
+                    let at = input.start + offset;
+                    if detections.iter().any(|d: &Detection| d.input == i && (d.at - at).abs() < SAME_ONSET_S) {
+                        continue;
+                    }
+                    // Later phases of a repeat the detector saw only from them.
+                    detections.retain(|d| !(d.input == i && d.at > at && d.at < at + span));
+                    detections.push(Detection {
+                        input: i,
+                        onset: Picked { time: input.recorded.add_seconds(offset), ratio: trigger.peak, uncertainty_s: step },
+                        at,
+                        end: input.start + trigger.off as f64 / input.rate,
+                    });
+                }
+            }
+            Err(error) => errors.push((input.trace, error)),
+        }
     }
     let arrivals: Vec<Arrival> = detections
         .iter()
@@ -162,16 +206,27 @@ impl From<&DetectInput> for DetectMeta {
     }
 }
 
-/// Events and picks for each candidate; with `replace`, automatic events go first.
+/// Events and picks for each candidate; with `replace`, automatic events go
+/// first. A candidate whose arrivals are mostly on members of a kept event,
+/// within its window, is that event again and is skipped.
 pub fn event_changes(project: &Project, meta: &[DetectMeta], outcome: &DetectOutcome, reference: Timestamp, replace: bool, hash: &str) -> Vec<Change> {
     let mut changes: Vec<Change> = if replace {
         project.events().iter().filter(|e| Project::replaceable(e)).map(|e| Change::RemoveEvent { event: e.id }).collect()
     } else {
         Vec::new()
     };
+    let kept: Vec<&Event> = project.events().iter().filter(|e| !replace || !Project::replaceable(e)).collect();
     let auto = |stage: &str| Provenance::Auto { stage: stage.to_string(), config_hash: hash.to_string() };
     for candidate in &outcome.candidates {
         let members: Vec<&Detection> = candidate.arrivals.iter().map(|&i| &outcome.detections[i]).collect();
+        let again = kept.iter().any(|e| {
+            let (from, to) = (e.start.seconds_since(reference), e.end.seconds_since(reference));
+            let inside = members.iter().filter(|d| e.member(meta[d.input].trace).is_some() && (from..=to).contains(&d.at)).count();
+            2 * inside > members.len()
+        });
+        if again {
+            continue;
+        }
         let first = members.iter().map(|d| d.at).fold(f64::INFINITY, f64::min);
         let last = candidate
             .arrivals
@@ -352,6 +407,9 @@ pub struct EventWindows {
     pub catalogue_open: bool,
     specs: HashMap<PhenomenologyId, DetectorSpec>,
     associate: AssociateSettings,
+    /// Matched filter on library templates, where a sensor has any.
+    matched: bool,
+    matched_spec: MatchedSpec,
     replace: bool,
     selected_only: bool,
     task: Option<(DetectJob, Task<DetectOutcome>)>,
@@ -369,6 +427,8 @@ impl Default for EventWindows {
             catalogue_open: false,
             specs: HashMap::new(),
             associate: AssociateSettings::default(),
+            matched: true,
+            matched_spec: MatchedSpec::default(),
             replace: true,
             selected_only: false,
             task: None,
@@ -558,6 +618,19 @@ fn detect_window(ctx: &egui::Context, windows: &mut EventWindows, workspace: &mu
         if present.is_empty() {
             ui.label("No assigned, loaded tracks.");
         }
+        let templated = workspace.project.templates().iter().flat_map(|t| &t.traces).map(|t| t.sensor).collect::<std::collections::HashSet<Id>>();
+        let with = chosen.iter().filter(|t| workspace.project.trace(t.trace).is_some_and(|t| templated.contains(&t.sensor))).count();
+        ui.horizontal(|ui| {
+            ui.add_enabled(with > 0, egui::Checkbox::new(&mut windows.matched, "Matched filter"))
+                .on_hover_text("Also correlate each track with the library templates of its sensor (Events ▸ Templates); finds repeats below the detector's threshold");
+            let m = &mut windows.matched_spec;
+            ui.add_enabled_ui(with > 0 && windows.matched, |ui| {
+                ui.add(egui::DragValue::new(&mut m.length_s).range(0.5..=600.0).speed(0.1).prefix("first ").suffix(" s"));
+                ui.add(egui::DragValue::new(&mut m.on).range(0.05..=1.0).speed(0.01).prefix("on CC "));
+                ui.add(egui::DragValue::new(&mut m.off).range(0.0..=1.0).speed(0.01).prefix("off "));
+            });
+            ui.weak(format!("{with} of {} tracks have templates", chosen.len()));
+        });
         ui.separator();
         let a = &mut windows.associate;
         let mut radius_km = a.radius_m / 1e3;
@@ -599,10 +672,13 @@ fn detect_window(ctx: &egui::Context, windows: &mut EventWindows, workspace: &mu
                         SampleKind::Complex => series.samples.series(IqComponent::Magnitude).iter().collect(),
                     };
                     let spec = windows.specs.get(id).copied().unwrap_or_else(|| default_detector(id.as_str(), track.rate));
-                    inputs.extend(DetectInput::new(project, trace, values, spec, windows.associate.radius_m));
+                    let input = DetectInput::new(project, trace, values, spec, windows.associate.radius_m);
+                    inputs.extend(input.map(|i| if windows.matched { i.with_templates(project, windows.matched_spec) } else { i }));
                 }
                 let settings = windows.associate;
-                let key = format!("{settings:?} {:?}", inputs.iter().map(|i| i.spec).collect::<Vec<_>>());
+                let templates: Vec<Id> =
+                    if inputs.iter().any(|i| !i.templates.is_empty()) { project.templates().iter().map(|t| t.id).collect() } else { Vec::new() };
+                let key = format!("{settings:?} {:?} {templates:?} {:?}", inputs.iter().map(|i| i.spec).collect::<Vec<_>>(), windows.matched_spec);
                 let job = DetectJob {
                     meta: inputs.iter().map(DetectMeta::from).collect(),
                     reference: project.reference.expect("checked"),
@@ -910,14 +986,16 @@ mod tests {
         assert!(!found[3], "the weak event should be missed");
         assert_eq!(workspace.project.picks().len(), 8 * synthetic::SWARM_DETECTABLE);
 
-        // A re-run replaces automatic events but keeps reviewed ones.
+        // A re-run replaces automatic events, keeps reviewed ones and does not detect them again.
         let kept = events[0].id;
         let accept = status_change(&workspace.project, kept, EventStatus::Reviewed).unwrap();
         workspace.execute("accept", vec![accept]).unwrap();
         let changes = event_changes(&workspace.project, &meta, &outcome, reference, true, "test");
         workspace.execute("again", changes).unwrap();
-        assert_eq!(workspace.project.events().len(), synthetic::SWARM_DETECTABLE + 1);
+        assert_eq!(workspace.project.events().len(), synthetic::SWARM_DETECTABLE);
         assert!(workspace.project.event(kept).is_some());
+        let changes = event_changes(&workspace.project, &meta, &outcome, reference, false, "test");
+        assert!(changes.is_empty(), "adding finds nothing new");
     }
 
     fn event_with_picks() -> (Workspace, Id, Vec<Id>) {

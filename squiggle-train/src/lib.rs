@@ -5,14 +5,15 @@
 
 use std::path::Path;
 
-use squiggle_core::features::{EVENT_FEATURES, FEATURE_SET, event_index};
+use squiggle_core::features::{COMPATIBLE_FEATURE_SETS, EVENT_FEATURES, FEATURE_SET, event_index};
 use squiggle_core::taxonomy::{NOISE, Taxonomy};
 use squiggle_core::windows::{WINDOW_SET, WindowSpec, Windows};
 use squiggle_core::{LabelId, Timestamp};
 use squiggle_io::dataset::{EVENTS_FILE, Manifest, Values, WINDOWS_FILE, read_dataset, read_windows};
 use squiggle_models::deep::{self, Architecture, Branch, DeepModel, Encoder, Example, Fusion};
 use squiggle_models::metrics::{Scores, cross_validate, stratified_folds};
-use squiggle_models::package::{self, ClassCount, Input, Inputs, Output, Spec, Training, Weights};
+use squiggle_models::cluster::{ClusterParams, Embedding};
+use squiggle_models::package::{self, ClassCount, ClusterSummary, Input, Inputs, Output, Spec, Training, Weights};
 use squiggle_models::{Kind, Package, Params, Trained};
 
 /// One phenomenology's windows in a dataset.
@@ -39,7 +40,7 @@ pub struct Dataset {
 impl Dataset {
     pub fn load(dir: &Path) -> Result<Self, String> {
         let (events, _, manifest) = read_dataset(dir)?;
-        if manifest.feature_set != FEATURE_SET {
+        if !COMPATIBLE_FEATURE_SETS.contains(&manifest.feature_set.as_str()) {
             return Err(format!("feature set {} is not {FEATURE_SET}", manifest.feature_set));
         }
         let text = |name: &str| match events.column(name) {
@@ -212,8 +213,9 @@ pub fn train(dataset: &Dataset, options: &Options) -> Result<Package, String> {
             settings: dataset.manifest.feature_settings.unwrap_or_default(),
             branches: Vec::new(),
         },
-        output: Output { taxonomy_version: dataset.manifest.taxonomy_version, level: options.level.name().to_string(), labels: labels.clone() },
+        output: Output { taxonomy_version: dataset.manifest.taxonomy_version, level: options.level.name().to_string(), labels: labels.clone(), clusters: Vec::new() },
         params: options.params.clone(),
+        cluster: None,
         training: Training {
             project: dataset.manifest.project.clone(),
             dataset: dataset.manifest.hashes.iter().find(|h| h.0 == EVENTS_FILE).map(|h| h.1.clone()).unwrap_or_default(),
@@ -312,6 +314,103 @@ pub fn predictions(package: &Package, dataset: &Dataset) -> Vec<(String, Option<
         .collect()
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct ClusterOptions {
+    /// Defaults to `cluster`.
+    pub name: Option<String>,
+    pub version: u32,
+    /// Event features to use; all when `None`.
+    pub features: Option<Vec<String>>,
+    pub params: ClusterParams,
+}
+
+/// Fits PCA and DBSCAN to every event of `dataset`, labelled or not;
+/// returns the package and each event's cluster.
+pub fn cluster(dataset: &Dataset, options: &ClusterOptions) -> Result<(Package, Vec<Option<usize>>), String> {
+    let features: Vec<String> = match &options.features {
+        Some(names) => names.clone(),
+        None => EVENT_FEATURES.iter().map(|s| s.to_string()).collect(),
+    };
+    let columns = features.iter().map(|n| event_index(n).ok_or_else(|| format!("unknown feature {n}"))).collect::<Result<Vec<usize>, String>>()?;
+    if dataset.rows.len() < options.params.min_points.max(2) {
+        return Err(format!("needs at least {} events; found {}", options.params.min_points.max(2), dataset.rows.len()));
+    }
+    let x: Vec<Vec<f64>> = dataset.rows.iter().map(|r| columns.iter().map(|&c| r[c]).collect()).collect();
+    let (embedding, assigned) = Embedding::fit(&x, &options.params);
+    let count = |rows: &mut dyn Iterator<Item = usize>| {
+        let mut classes: Vec<ClassCount> = Vec::new();
+        for i in rows {
+            let Some(class) = &dataset.classes[i] else { continue };
+            match classes.iter_mut().find(|c| &c.label == class) {
+                Some(c) => c.events += 1,
+                None => classes.push(ClassCount { label: class.clone(), events: 1 }),
+            }
+        }
+        classes.sort_by(|a, b| b.events.cmp(&a.events).then(a.label.cmp(&b.label)));
+        classes
+    };
+    let clusters = (0..embedding.clusters)
+        .map(|k| ClusterSummary {
+            cluster: k,
+            events: assigned.iter().filter(|a| **a == Some(k)).count(),
+            classes: count(&mut (0..assigned.len()).filter(|&i| assigned[i] == Some(k))),
+        })
+        .collect();
+    let spec = Spec {
+        format: package::FORMAT.to_string(),
+        id: package::model_id(options.name.as_deref().unwrap_or(package::CLUSTER), options.version.max(1)),
+        kind: package::CLUSTER.to_string(),
+        created: Timestamp::now().to_string(),
+        models_version: env!("CARGO_PKG_VERSION").to_string(),
+        input: Input {
+            kind: package::EVENT_FEATURES.to_string(),
+            feature_set: dataset.manifest.feature_set.clone(),
+            preprocess: squiggle_models::preprocess::DESCRIPTION.to_string(),
+            features,
+            window_set: String::new(),
+            fusion: None,
+            settings: dataset.manifest.feature_settings.unwrap_or_default(),
+            branches: Vec::new(),
+        },
+        output: Output { taxonomy_version: dataset.manifest.taxonomy_version, level: Level::Leaf.name().to_string(), labels: Vec::new(), clusters },
+        params: Params::default(),
+        cluster: Some(ClusterParams { components: embedding.components.len(), eps: embedding.eps, min_points: embedding.min_points }),
+        training: Training {
+            project: dataset.manifest.project.clone(),
+            dataset: dataset.manifest.hashes.iter().find(|h| h.0 == EVENTS_FILE).map(|h| h.1.clone()).unwrap_or_default(),
+            events: dataset.rows.len(),
+            seed: 0,
+            folds: 0,
+            classes: count(&mut (0..dataset.rows.len())),
+            fit: Scores::default(),
+            cross_validation: Scores::default(),
+        },
+        weights: Weights::empty(),
+    };
+    Ok((Package::cluster(spec, &embedding)?, assigned))
+}
+
+/// Adjusted Rand index of two labellings (`None` is its own singleton): 1 when identical, about 0 when random.
+pub fn adjusted_rand(a: &[Option<usize>], b: &[Option<usize>]) -> f64 {
+    let n = a.len().min(b.len());
+    let key = |l: Option<usize>, i: usize| l.map_or(usize::MAX - i, |v| v);
+    let mut table: std::collections::HashMap<(usize, usize), f64> = std::collections::HashMap::new();
+    let mut rows: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
+    let mut cols: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
+    for i in 0..n {
+        let (x, y) = (key(a[i], i), key(b[i], i));
+        *table.entry((x, y)).or_default() += 1.0;
+        *rows.entry(x).or_default() += 1.0;
+        *cols.entry(y).or_default() += 1.0;
+    }
+    let pairs = |v: f64| v * (v - 1.0) / 2.0;
+    let index: f64 = table.values().copied().map(pairs).sum();
+    let (sa, sb): (f64, f64) = (rows.values().copied().map(pairs).sum(), cols.values().copied().map(pairs).sum());
+    let expected = sa * sb / pairs(n as f64).max(1.0);
+    let max = (sa + sb) / 2.0;
+    if (max - expected).abs() < 1e-12 { 1.0 } else { (index - expected) / (max - expected) }
+}
+
 /// Packages an ONNX graph on event features: `[1, features]` in, `[1, labels]` out.
 pub fn package_onnx(onnx: Vec<u8>, features: Vec<String>, labels: Vec<String>, name: &str, version: u32, taxonomy_version: u32) -> Result<Package, String> {
     if let Some(f) = features.iter().find(|f| event_index(f).is_none()) {
@@ -333,8 +432,9 @@ pub fn package_onnx(onnx: Vec<u8>, features: Vec<String>, labels: Vec<String>, n
             settings: Default::default(),
             branches: Vec::new(),
         },
-        output: Output { taxonomy_version, level: Level::Leaf.name().to_string(), labels },
+        output: Output { taxonomy_version, level: Level::Leaf.name().to_string(), labels, clusters: Vec::new() },
         params: Params::default(),
+        cluster: None,
         training: Training {
             project: String::new(),
             dataset: String::new(),

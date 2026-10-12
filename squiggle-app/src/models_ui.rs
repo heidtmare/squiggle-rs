@@ -1,6 +1,6 @@
 //! Model manager: imports packages written by `squiggle-train`, enables and
 //! disables them, and shows their training scores and how often analysts
-//! agree with them. Packages stay on disk; the project records their path and
+//! agree with each model version (the rules and templates included). Packages stay on disk; the project records their path and
 //! hash, and a package that changed since import is refused.
 
 use std::collections::HashMap;
@@ -61,14 +61,19 @@ impl ModelRegistry {
         }
     }
 
-    /// Enabled packages that load and fit the project's taxonomy.
+    /// Enabled classifiers that load and fit the project's taxonomy.
     pub fn active(&self, project: &Project) -> Vec<Arc<Package>> {
         project
             .models()
             .iter()
             .filter(|m| m.enabled)
-            .filter_map(|m| self.package(&m.id).ok().filter(|p| fits(project, p).is_ok()).cloned())
+            .filter_map(|m| self.package(&m.id).ok().filter(|p| p.is_classifier() && fits(project, p).is_ok()).cloned())
             .collect()
+    }
+
+    /// Embedding (cluster) packages that load.
+    pub fn embeddings(&self, project: &Project) -> Vec<Arc<Package>> {
+        project.models().iter().filter_map(|m| self.package(&m.id).ok().filter(|p| !p.is_classifier()).cloned()).collect()
     }
 }
 
@@ -97,6 +102,9 @@ pub fn fits(project: &Project, package: &Package) -> Result<Option<String>, Stri
 /// Kind and inputs, e.g. "cnn (late): seismic*, infrasound" (* required).
 pub fn describe(package: &Package) -> String {
     let spec = &package.spec;
+    if let Some(c) = spec.cluster {
+        return format!("cluster: PCA ({} components) and DBSCAN on {} features", c.components, spec.input.features.len());
+    }
     if spec.input.branches.is_empty() {
         return format!("{} on {} features", spec.kind, spec.input.features.len());
     }
@@ -134,6 +142,75 @@ pub fn agreement(project: &Project, model: &str) -> (usize, usize) {
         agree += usize::from(right);
     }
     (agree, total)
+}
+
+/// How often analysts agree with one model version.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Agreement {
+    pub model: String,
+    pub agree: usize,
+    pub compared: usize,
+    /// Over the `RECENT` latest compared events (by event time).
+    pub recent: (usize, usize),
+    /// (analyst class, predicted, events), most first.
+    pub confusion: Vec<(String, String, usize)>,
+}
+
+const RECENT: usize = 20;
+
+/// Agreement of every model with a recorded prediction on a reviewed or
+/// rejected event, by name then version.
+pub fn agreements(project: &Project) -> Vec<Agreement> {
+    let mut models: Vec<&str> = project.events().iter().flat_map(|e| e.predictions.iter().map(|p| p.model.as_str())).collect();
+    models.sort_by_key(|m| version_key(m));
+    models.dedup();
+    let mut events: Vec<&squiggle_core::Event> = project.events().iter().collect();
+    events.sort_by(|a, b| a.time().seconds_since(b.time()).total_cmp(&0.0));
+    models
+        .into_iter()
+        .filter_map(|model| {
+            let mut outcomes: Vec<bool> = Vec::new();
+            let mut confusion: Vec<(String, String, usize)> = Vec::new();
+            for event in &events {
+                let Some((top, _)) = event.prediction(model).and_then(|p| p.top()) else { continue };
+                let (truth, right) = match (event.status, &event.label) {
+                    (EventStatus::Rejected, _) => (NOISE.to_string(), top.as_str() == NOISE),
+                    (EventStatus::Reviewed, Some(label)) => (label.to_string(), project.taxonomy().is_a(label, top)),
+                    _ => continue,
+                };
+                outcomes.push(right);
+                match confusion.iter_mut().find(|c| c.0 == truth && c.1 == top.as_str()) {
+                    Some(c) => c.2 += 1,
+                    None => confusion.push((truth, top.to_string(), 1)),
+                }
+            }
+            if outcomes.is_empty() {
+                return None;
+            }
+            confusion.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+            let recent = &outcomes[outcomes.len().saturating_sub(RECENT)..];
+            Some(Agreement {
+                model: model.to_string(),
+                agree: outcomes.iter().filter(|o| **o).count(),
+                compared: outcomes.len(),
+                recent: (recent.iter().filter(|o| **o).count(), recent.len()),
+                confusion,
+            })
+        })
+        .collect()
+}
+
+/// Name and numeric version of `heidtmare.squiggle.model/<name>@<version>`.
+fn version_key(id: &str) -> (String, u64) {
+    let short = id.trim_start_matches("heidtmare.squiggle.model/");
+    match short.rsplit_once('@') {
+        Some((name, version)) => (name.to_string(), version.parse().unwrap_or(0)),
+        None => (short.to_string(), 0),
+    }
+}
+
+fn percent(agree: usize, of: usize) -> String {
+    if of == 0 { "—".to_string() } else { format!("{:.0}% of {of}", agree as f64 * 100.0 / of as f64) }
 }
 
 #[derive(Resource, Default)]
@@ -212,7 +289,11 @@ pub fn windows(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut
                     Ok(p) => {
                         let t = &p.spec.training;
                         ui.label(describe(p)).on_hover_text("* required phenomenology");
-                        ui.label(p.spec.output.labels.join(", ")).on_hover_text(format!("{} level", p.spec.output.level));
+                        if p.is_classifier() {
+                            ui.label(p.spec.output.labels.join(", ")).on_hover_text(format!("{} level", p.spec.output.level));
+                        } else {
+                            ui.label(format!("{} clusters", p.spec.output.clusters.len())).on_hover_text("Plotted in Events ▸ Scatter; not used by Classify");
+                        }
                         ui.label(format!("{} events", t.events)).on_hover_text(format!("{}\ndataset {}", t.project, &t.dataset[..t.dataset.len().min(12)]));
                         if t.folds > 0 {
                             ui.label(format!("{:.0}% ({}-fold)", t.cross_validation.accuracy * 100.0, t.folds))
@@ -227,10 +308,8 @@ pub fn windows(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut
                         }
                     }
                 }
-                match agreement(project, &model.id) {
-                    (_, 0) => ui.weak("—"),
-                    (agree, total) => ui.label(format!("{:.0}% of {total}", agree as f64 * 100.0 / total as f64)),
-                };
+                let (agree, total) = agreement(project, &model.id);
+                ui.label(percent(agree, total));
                 // Edited locally while dragging; one undoable change on release.
                 let weight = weights.entry(model.id.clone()).or_insert(model.weight);
                 let response = ui.add(egui::DragValue::new(weight).range(0.0..=10.0).speed(0.05)).on_hover_text("Vote in the ensemble consensus (the rules count 1)");
@@ -246,6 +325,40 @@ pub fn windows(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut
                 }
                 ui.end_row();
             }
+        });
+        let rows = agreements(project);
+        egui::CollapsingHeader::new("Analyst agreement by model version").default_open(!rows.is_empty()).show(ui, |ui| {
+            ui.weak(format!("Each recorded prediction's top label against reviewed labels (a model trained on a parent label agrees with its subtypes) and rejections (noise). Recent: the latest {RECENT} by event time."));
+            egui::Grid::new("agreement").num_columns(5).striped(true).show(ui, |ui| {
+                for heading in ["Model", "Version", "Agree", "Recent", "Change"] {
+                    ui.strong(heading);
+                }
+                ui.end_row();
+                let mut previous: Option<(String, f64)> = None;
+                for row in &rows {
+                    let (name, version) = version_key(&row.model);
+                    let rate = row.agree as f64 / row.compared as f64;
+                    ui.monospace(&name);
+                    ui.label(version.to_string());
+                    let mut matrix = String::from("Analyst → model: events\n");
+                    for (truth, predicted, n) in &row.confusion {
+                        matrix.push_str(&format!("{truth} → {predicted}: {n}\n"));
+                    }
+                    ui.label(percent(row.agree, row.compared)).on_hover_text(matrix);
+                    ui.label(percent(row.recent.0, row.recent.1));
+                    match &previous {
+                        Some((p, r)) if *p == name => {
+                            let delta = (rate - r) * 100.0;
+                            ui.label(format!("{delta:+.0} pts")).on_hover_text("Against the previous version");
+                        }
+                        _ => {
+                            ui.weak("—");
+                        }
+                    }
+                    previous = Some((name, rate));
+                    ui.end_row();
+                }
+            });
         });
         ui.separator();
         ui.horizontal(|ui| {

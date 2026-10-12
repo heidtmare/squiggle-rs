@@ -15,6 +15,10 @@
 //!   tell them apart. Checks features and classification.
 //! - [`catalogue`]: the same sensors over a longer, seeded run of varied
 //!   earthquakes and explosions, for training models.
+//! - [`families`]: the same sensors recording repeats from four sources (two
+//!   quarries, two earthquake swarms), each with one weak repeat; the swarms'
+//!   are too weak for STA/LTA. Checks clustering, template matching and the
+//!   matched filter.
 
 use std::f64::consts::TAU;
 use std::path::PathBuf;
@@ -373,7 +377,7 @@ pub struct MixedEvent {
     /// Fault strike, degrees; earthquakes only. Sets the P radiation pattern.
     strike: f64,
     /// Amplitude factor.
-    scale: f64,
+    pub scale: f64,
     /// Frequency factor.
     tone: f64,
 }
@@ -413,6 +417,65 @@ pub fn catalogue(seed: u64, n: usize) -> Vec<MixedEvent> {
             MixedEvent { class, east_km, north_km, depth_km, origin: 10.0 + 40.0 * i as f64, strike, scale: 0.6 + uniform(), tone: 0.8 + 0.45 * uniform() }
         })
         .collect()
+}
+
+/// A family of repeating sources: name, class, position, depth, strike, tone
+/// and the amplitude factor of its weak repeat.
+pub struct Family {
+    pub name: &'static str,
+    pub class: Class,
+    east_km: f64,
+    north_km: f64,
+    depth_km: f64,
+    strike: f64,
+    tone: f64,
+    pub weak: f64,
+}
+
+/// Explosions' short P carries little energy to correlate, so their weak
+/// repeats are stronger; the swarms' are under the STA/LTA threshold.
+pub const FAMILIES: [Family; 4] = [
+    Family { name: "north quarry", class: Class::Explosion, east_km: -3.0, north_km: 4.0, depth_km: 0.2, strike: 0.0, tone: 1.15, weak: 0.04 },
+    Family { name: "south quarry", class: Class::Explosion, east_km: 4.0, north_km: -3.5, depth_km: 0.4, strike: 0.0, tone: 0.8, weak: 0.04 },
+    Family { name: "shallow swarm", class: Class::Earthquake, east_km: 2.5, north_km: 2.5, depth_km: 5.0, strike: 30.0, tone: 1.1, weak: 0.015 },
+    Family { name: "deep swarm", class: Class::Earthquake, east_km: -3.5, north_km: -3.0, depth_km: 10.0, strike: 120.0, tone: 0.85, weak: 0.015 },
+];
+pub const FAMILY_REPEATS: usize = 6;
+
+/// Every family's repeats, 40 s apart from 10 s in a seeded order: within
+/// 100 m of the family's source, amplitude ×0.7–1.4, the last one weak.
+/// Returns the events and each one's family.
+pub fn families() -> (Vec<MixedEvent>, Vec<usize>) {
+    let mut state = 0x5eed_f00d_u64;
+    let mut uniform = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let mut slots: Vec<(usize, usize)> = (0..FAMILIES.len()).flat_map(|f| (0..FAMILY_REPEATS).map(move |r| (f, r))).collect();
+    for i in (1..slots.len()).rev() {
+        slots.swap(i, (uniform() * (i + 1) as f64) as usize % (i + 1));
+    }
+    let events = slots
+        .iter()
+        .enumerate()
+        .map(|(i, &(f, repeat))| {
+            let family = &FAMILIES[f];
+            let scale = if repeat == FAMILY_REPEATS - 1 { family.weak } else { 0.7 + 0.7 * uniform() };
+            MixedEvent {
+                class: family.class,
+                east_km: family.east_km + 0.2 * uniform() - 0.1,
+                north_km: family.north_km + 0.2 * uniform() - 0.1,
+                depth_km: family.depth_km * (0.97 + 0.06 * uniform()),
+                origin: 10.0 + 40.0 * i as f64,
+                strike: family.strike,
+                scale,
+                tone: family.tone,
+            }
+        })
+        .collect();
+    (events, slots.iter().map(|s| s.0).collect())
 }
 
 /// Seconds covering `events`.

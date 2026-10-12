@@ -8,6 +8,8 @@ mod demo;
 mod plot;
 mod classify_ui;
 mod models_ui;
+mod scatter_ui;
+mod templates_ui;
 mod events_ui;
 mod locate_ui;
 mod process_ui;

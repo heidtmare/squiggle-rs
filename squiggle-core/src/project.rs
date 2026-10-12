@@ -13,6 +13,7 @@ use crate::model::ModelRef;
 use crate::phenomenology::{self, Phenomenology, PhenomenologyId};
 use crate::sensor::{Alignment, Analyst, Assignment, ClockCorrection, Location, Pick, Provenance, Sensor, Trace};
 use crate::taxonomy::{self, Label, LabelId, Taxonomy};
+use crate::template::Template;
 use crate::time::Timestamp;
 
 /// Project file format identifier.
@@ -89,6 +90,9 @@ pub enum Change {
     /// Adds or replaces an imported model with this id.
     SetModel(ModelRef),
     RemoveModel { model: String },
+    /// Adds or replaces the library template with this id.
+    SetTemplate(Template),
+    RemoveTemplate { template: Id },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -117,6 +121,8 @@ pub enum ApplyError {
     UnknownLabel(LabelId),
     InvalidLabel(String),
     UnknownModel(String),
+    UnknownTemplate(Id),
+    InvalidTemplate(String),
 }
 
 impl fmt::Display for ApplyError {
@@ -146,6 +152,8 @@ impl fmt::Display for ApplyError {
             Self::UnknownLabel(id) => write!(f, "no label {id}"),
             Self::InvalidLabel(why) => write!(f, "invalid label: {why}"),
             Self::UnknownModel(id) => write!(f, "no model {id}"),
+            Self::UnknownTemplate(id) => write!(f, "no template {id}"),
+            Self::InvalidTemplate(why) => write!(f, "invalid template: {why}"),
         }
     }
 }
@@ -166,6 +174,7 @@ pub struct Project {
     events: Vec<Event>,
     taxonomy: Taxonomy,
     models: Vec<ModelRef>,
+    templates: Vec<Template>,
 }
 
 impl Project {
@@ -380,6 +389,9 @@ impl Project {
                 if self.events.iter().any(|e| e.label.as_ref() == Some(label)) {
                     return Err(ApplyError::InvalidLabel(format!("events are labelled {label}")));
                 }
+                if self.templates.iter().any(|t| t.label.as_ref() == Some(label)) {
+                    return Err(ApplyError::InvalidLabel(format!("templates are labelled {label}")));
+                }
                 if self.taxonomy.labels.iter().any(|l| l.parent.as_ref() == Some(label)) {
                     return Err(ApplyError::InvalidLabel(format!("{label} has subtypes")));
                 }
@@ -394,6 +406,25 @@ impl Project {
             Change::RemoveModel { model } => {
                 let index = self.models.iter().position(|m| &m.id == model).ok_or_else(|| ApplyError::UnknownModel(model.clone()))?;
                 self.models.remove(index);
+            }
+            Change::SetTemplate(template) => {
+                template.validate().map_err(ApplyError::InvalidTemplate)?;
+                if let Some(label) = &template.label
+                    && self.taxonomy.get(label).is_none()
+                {
+                    return Err(ApplyError::UnknownLabel(label.clone()));
+                }
+                if let Some(t) = template.traces.iter().find(|t| self.sensor(t.sensor).is_none()) {
+                    return Err(ApplyError::UnknownSensor(t.sensor));
+                }
+                match self.templates.iter_mut().find(|t| t.id == template.id) {
+                    Some(existing) => *existing = template.clone(),
+                    None => self.templates.push(template.clone()),
+                }
+            }
+            Change::RemoveTemplate { template } => {
+                let index = self.templates.iter().position(|t| t.id == *template).ok_or(ApplyError::UnknownTemplate(*template))?;
+                self.templates.remove(index);
             }
         }
         Ok(())
@@ -488,6 +519,11 @@ impl Project {
                 None => Change::RemoveModel { model: model.id.clone() },
             })),
             Change::RemoveModel { model } => one(self.model(model).map(|m| Change::SetModel(m.clone()))),
+            Change::SetTemplate(template) => one(Some(match self.template(template.id) {
+                Some(old) => Change::SetTemplate(old.clone()),
+                None => Change::RemoveTemplate { template: template.id },
+            })),
+            Change::RemoveTemplate { template } => one(self.template(*template).map(|t| Change::SetTemplate(t.clone()))),
             _ => None,
         }
     }
@@ -502,6 +538,14 @@ impl Project {
 
     pub fn model(&self, id: &str) -> Option<&ModelRef> {
         self.models.iter().find(|m| m.id == id)
+    }
+
+    pub fn templates(&self) -> &[Template] {
+        &self.templates
+    }
+
+    pub fn template(&self, id: Id) -> Option<&Template> {
+        self.templates.iter().find(|t| t.id == id)
     }
 
     /// Ensemble weight of `model`'s predictions: its reference's, else 1 (the rules).
@@ -1047,6 +1091,29 @@ mod tests {
         assert_eq!(project.origin_of(None), None);
         project.commit(&analyst(), Change::RemoveTrace { trace: t.id }).unwrap();
         assert!(project.event(e.id).unwrap().members.is_empty());
+    }
+
+    #[test]
+    fn templates_validate_undo_and_hold_their_label() {
+        use crate::template::TemplateTrace;
+        let (mut project, _) = Project::create("p", &analyst());
+        let t = assigned(&mut project);
+        let trace = TemplateTrace { sensor: t.sensor, phenomenology: PhenomenologyId::new("seismic"), rate: 40.0, pre_s: 1.0, samples: vec![0.5; 64] };
+        let template = Template { id: Id::generate(), name: "quarry".into(), label: Some(LabelId::new(taxonomy::EXPLOSION)), event: None, traces: vec![trace.clone()] };
+        let ghost = Template { traces: vec![TemplateTrace { sensor: Id::generate(), ..trace.clone() }], ..template.clone() };
+        assert!(matches!(project.commit(&analyst(), Change::SetTemplate(ghost)), Err(ApplyError::UnknownSensor(_))));
+        let empty = Template { traces: vec![], ..template.clone() };
+        assert!(matches!(project.commit(&analyst(), Change::SetTemplate(empty)), Err(ApplyError::InvalidTemplate(_))));
+        let set = Change::SetTemplate(template.clone());
+        let undo = project.inverse(&set).unwrap();
+        project.commit(&analyst(), set).unwrap();
+        assert_eq!(project.templates(), std::slice::from_ref(&template));
+        let remove = Change::RemoveLabel { label: LabelId::new(taxonomy::EXPLOSION) };
+        assert!(matches!(project.commit(&analyst(), remove), Err(ApplyError::InvalidLabel(_))));
+        for change in undo {
+            project.commit(&analyst(), change).unwrap();
+        }
+        assert!(project.templates().is_empty());
     }
 
     #[test]
