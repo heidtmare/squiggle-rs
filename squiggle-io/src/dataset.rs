@@ -7,13 +7,15 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow_array::{ArrayRef, Float64Array, RecordBatch, StringArray};
+use arrow_array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use parquet::arrow::ArrowWriter;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use squiggle_core::Label;
+use squiggle_core::features::FeatureSettings;
 
 pub const FORMAT: &str = "heidtmare.squiggle.dataset/1";
 pub const EVENTS_FILE: &str = "events.parquet";
@@ -53,6 +55,10 @@ impl Table {
 
     pub fn rows(&self) -> usize {
         self.columns.first().map_or(0, |c| c.1.len())
+    }
+
+    pub fn column(&self, name: &str) -> Option<&Values> {
+        self.columns.iter().find(|c| c.0 == name).map(|c| &c.1)
     }
 
     fn batch(&self, metadata: HashMap<String, String>) -> Result<RecordBatch, String> {
@@ -96,9 +102,40 @@ pub fn write_parquet(path: &Path, table: &Table, metadata: HashMap<String, Strin
     Ok(())
 }
 
-#[derive(Clone, Debug, Serialize)]
+/// Reads a table written by [`write_parquet`]: text and float columns only, nulls as `None` and NaN.
+pub fn read_parquet(path: &Path) -> Result<Table, String> {
+    let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file).and_then(|b| b.build()).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut table: Option<Table> = None;
+    for batch in reader {
+        let batch = batch.map_err(|e| format!("{}: {e}", path.display()))?;
+        let table = table.get_or_insert_with(|| Table {
+            columns: batch
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| (f.name().clone(), if f.data_type() == &DataType::Utf8 { Values::Text(Vec::new()) } else { Values::Number(Vec::new()) }))
+                .collect(),
+        });
+        for ((name, values), array) in table.columns.iter_mut().zip(batch.columns()) {
+            match values {
+                Values::Text(v) => {
+                    let array = array.as_any().downcast_ref::<StringArray>().ok_or_else(|| format!("column {name} is not text"))?;
+                    v.extend((0..array.len()).map(|i| (!array.is_null(i)).then(|| array.value(i).to_string())));
+                }
+                Values::Number(v) => {
+                    let array = array.as_any().downcast_ref::<Float64Array>().ok_or_else(|| format!("column {name} is not a float"))?;
+                    v.extend((0..array.len()).map(|i| if array.is_null(i) { f64::NAN } else { array.value(i) }));
+                }
+            }
+        }
+    }
+    Ok(table.unwrap_or_default())
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
-    pub format: &'static str,
+    pub format: String,
     pub project: String,
     pub created: String,
     pub analyst: String,
@@ -106,7 +143,10 @@ pub struct Manifest {
     pub taxonomy_version: u32,
     pub labels: Vec<Label>,
     /// Class rejected events carry.
-    pub noise_class: &'static str,
+    pub noise_class: String,
+    /// Settings the features were computed with.
+    #[serde(default)]
+    pub feature_settings: Option<FeatureSettings>,
     pub event_features: Vec<String>,
     pub member_features: Vec<String>,
     /// Events per class (`null` for unlabelled).
@@ -140,11 +180,32 @@ pub fn write_dataset(dir: &Path, events: &Table, members: &Table, mut manifest: 
     Ok(manifest)
 }
 
+/// Reads a dataset written by [`write_dataset`], checking each table against its hash.
+pub fn read_dataset(dir: &Path) -> Result<(Table, Table, Manifest), String> {
+    let path = dir.join(MANIFEST_FILE);
+    let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    if manifest.format != FORMAT {
+        return Err(format!("format {} is not {FORMAT}", manifest.format));
+    }
+    let mut tables = Vec::new();
+    for name in [EVENTS_FILE, MEMBERS_FILE] {
+        let path = dir.join(name);
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let expected = manifest.hashes.iter().find(|h| h.0 == name).map(|h| h.1.as_str());
+        if expected != Some(blake3::hash(&bytes).to_hex().as_str()) {
+            return Err(format!("{name} does not match the manifest's hash"));
+        }
+        tables.push(read_parquet(&path)?);
+    }
+    let members = tables.pop().unwrap_or_default();
+    let events = tables.pop().unwrap_or_default();
+    Ok((events, members, manifest))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::Array;
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     #[test]
     fn tables_round_trip_with_nulls_and_metadata() {
@@ -155,14 +216,15 @@ mod tests {
         let mut members = Table::default();
         members.text("event", vec![Some("a".into())]);
         let manifest = Manifest {
-            format: FORMAT,
+            format: FORMAT.into(),
             project: "p".into(),
             created: "now".into(),
             analyst: "ana".into(),
             feature_set: "f/1".into(),
             taxonomy_version: 3,
             labels: squiggle_core::taxonomy::seed(),
-            noise_class: squiggle_core::taxonomy::NOISE,
+            noise_class: squiggle_core::taxonomy::NOISE.into(),
+            feature_settings: Some(FeatureSettings::default()),
             event_features: vec!["p_s_log".into()],
             member_features: vec![],
             classes: vec![],
@@ -185,6 +247,14 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.path().join(MANIFEST_FILE)).unwrap()).unwrap();
         assert_eq!(json["format"], FORMAT);
         assert_eq!(json["labels"][1]["id"], "explosion");
+
+        let (read, _, back) = read_dataset(dir.path()).unwrap();
+        assert_eq!(back, written);
+        assert_eq!(read.column("label"), events.column("label"));
+        let Some(Values::Number(ratios)) = read.column("p_s_log") else { panic!() };
+        assert_eq!((ratios[0], ratios[1].is_nan()), (0.5, true));
+        std::fs::write(dir.path().join(MEMBERS_FILE), b"x").unwrap();
+        assert!(read_dataset(dir.path()).unwrap_err().contains("hash"));
 
         let mut ragged = Table::default();
         ragged.number("a", vec![1.0]);

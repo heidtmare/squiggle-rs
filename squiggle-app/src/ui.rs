@@ -22,6 +22,7 @@ use crate::plot::{AddSquiggle, FitToData, Plot, PlotCamera, PlotMode, RemoveSqui
 use crate::classify_ui::{self, ClassifyWindows};
 use crate::events_ui::{self, EventWindows};
 use crate::locate_ui::{self, LocateWindows};
+use crate::models_ui::{self, ModelRegistry, ModelWindows};
 use crate::process_ui::{self, ProcessWindows};
 use crate::project_ui::{self, ProjectAccess, ProjectWindows};
 use crate::workspace::{SyntheticEvent, WorkspaceRequest};
@@ -47,6 +48,8 @@ impl Plugin for UiPlugin {
             .init_resource::<LocateWindows>()
             .init_resource::<EventWindows>()
             .init_resource::<ClassifyWindows>()
+            .init_resource::<ModelWindows>()
+            .init_resource::<ModelRegistry>()
             .add_systems(Startup, setup)
             .add_systems(
                 EguiPrimaryContextPass,
@@ -57,6 +60,7 @@ impl Plugin for UiPlugin {
                     process_ui::windows,
                     locate_ui::windows,
                     events_ui::windows,
+                    models_ui::windows,
                     classify_ui::windows,
                 )
                     .chain(),
@@ -85,6 +89,7 @@ pub struct TrackAccess<'w, 's> {
     locate: ResMut<'w, LocateWindows>,
     events: ResMut<'w, EventWindows>,
     classify: ResMut<'w, ClassifyWindows>,
+    models: ResMut<'w, ModelWindows>,
 }
 
 /// Which parts of the chrome are open.
@@ -323,6 +328,7 @@ fn menu_bar(
             events_ui::events_menu(ui, &mut tracks.events, &mut tracks.view);
             ui.separator();
             classify_ui::classify_menu(ui, &mut tracks.classify);
+            models_ui::models_menu(ui, &mut tracks.models);
             if tracks.events.detect_open || tracks.events.catalogue_open || tracks.classify.features_open {
                 *tracks.mode = PlotMode::Tracks;
             }
@@ -788,7 +794,7 @@ fn about_window(ctx: &egui::Context, chrome: &mut Chrome) {
             ui.label("Process ▸ Filter and detrend preprocesses selected tracks; Process ▸ Align measures and applies delays.");
             ui.label("Process ▸ Pick finds onsets; Process ▸ Locate fits source position and origin time, and removes moveout.");
             ui.label("Events ▸ Detect finds and associates events; Events ▸ Catalogue reviews them. ⌘/Ctrl+drag makes an event; drag its edges to resize; right-click to split. While reviewing: ] / [ next and previous, A accept, R reject, 1–9 label, Esc close.");
-            ui.label("Events ▸ Classify runs features and the rules classifier; Features shows the reviewed event's evidence; Labels edits the taxonomy; Export dataset writes Parquet for training.");
+            ui.label("Events ▸ Classify runs features and the rules classifier; Features shows the reviewed event's evidence; Labels edits the taxonomy; Export dataset writes Parquet for training; Models imports packages from squiggle-train, whose predictions Classify then records.");
             ui.label("Edits to processing, offsets, picks, sensor locations, origins and events undo with ⌘Z / Ctrl+Z and redo with ⇧⌘Z.");
             ui.label("Transform turns the selected squiggles, or the visible part of selected tracks, into spectra or wavelet levels.");
         });

@@ -8,10 +8,12 @@ description = "Bevy application shell for the Squiggle waveform plot."
 [dependencies]
 squiggle-core.workspace = true
 squiggle-io.workspace = true
+squiggle-models.workspace = true
 bevy.workspace = true
 bevy_egui.workspace = true
 rand = "0.9"
 rfd = "0.17"
 
 [dev-dependencies]
+squiggle-train.workspace = true
 tempfile = "3"
