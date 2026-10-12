@@ -370,6 +370,14 @@ fn menu_bar(
                 project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Mixed));
                 ui.close();
             }
+            if ui
+                .button("Synthetic training catalogue")
+                .on_hover_text("A new project: 27 minutes of 40 varied earthquakes and explosions on the same sensors, to label, export and train on")
+                .clicked()
+            {
+                project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Catalogue));
+                ui.close();
+            }
             ui.separator();
             for scene in Scene::ALL {
                 if ui

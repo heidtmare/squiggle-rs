@@ -774,11 +774,11 @@ fn catalogue_window(
                         Some(o) => ui.monospace(format!("{:.4}°, {:.4}°, {:.1} km", o.latitude, o.longitude, o.depth_m / 1e3)),
                         None => ui.weak("—"),
                     };
-                    match event.consensus().first() {
+                    match project.consensus(event).first() {
                         Some((label, p)) => {
                             let name = project.taxonomy().get(label).map_or(label.as_str(), |l| l.name.as_str());
                             ui.label(format!("{name} {:.0}%", p * 100.0))
-                                .on_hover_text(format!("uncertainty {:.2} over {} model(s)", event.uncertainty(), event.predictions.len()))
+                                .on_hover_text(format!("uncertainty {:.2} over {} model(s)", project.uncertainty(event), event.predictions.len()))
                         }
                         None => ui.weak("—"),
                     };

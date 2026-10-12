@@ -93,16 +93,22 @@ pub enum Kind {
     Other,
 }
 
+/// Propagation class: P and S phases are seismic-like, under 1 km/s air, over 10⁸ m/s EM.
+pub fn kind_of(propagation: &Propagation) -> Kind {
+    let named = |n: &str| propagation.phases().iter().any(|p| p.0 == n);
+    match propagation {
+        Propagation::Phases(_) if named("P") && named("S") => Kind::Seismic,
+        Propagation::Constant { speed_m_s } if *speed_m_s < 1e3 => Kind::Air,
+        Propagation::Constant { speed_m_s } if *speed_m_s > 1e8 => Kind::Electromagnetic,
+        _ => Kind::Other,
+    }
+}
+
 impl TraceData {
     pub fn kind(&self) -> Kind {
-        let named = |n: &str| self.propagation.phases().iter().any(|p| p.0 == n);
-        match &self.propagation {
-            Propagation::Phases(_) if named("P") && named("S") => Kind::Seismic,
-            Propagation::Constant { speed_m_s } if *speed_m_s < 1e3 => Kind::Air,
-            Propagation::Constant { speed_m_s } if *speed_m_s > 1e8 => Kind::Electromagnetic,
-            _ => Kind::Other,
-        }
+        kind_of(&self.propagation)
     }
+
 
     fn index(&self, t: f64) -> f64 {
         (t - self.start) * self.rate

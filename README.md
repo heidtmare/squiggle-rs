@@ -38,9 +38,12 @@ them through Fourier and wavelet transforms without leaving the plot.
   seeded with earthquake, explosion and other; a review queue ordered by
   uncertainty and model disagreement; training datasets exported as Parquet.
 - **Offline models.** `squiggle-train` fits logistic regression, linear SVM,
-  kNN, a decision tree or a random forest to an exported dataset and writes a
-  checksummed model package; the app imports packages and runs inference
-  only, recording each model's prediction on every event.
+  kNN, a decision tree or a random forest to exported features, or a CNN
+  (burn) to exported waveform windows with one branch per phenomenology and
+  late or early fusion, and writes a checksummed model package; ONNX models
+  can be packaged too. The app imports packages and runs inference only,
+  recording each model's prediction on every event and combining them in a
+  weighted ensemble.
 - **Spectrogram strips** per row, two-sided for I/Q.
 - **Independent axis zoom.** Zoom x and y together or separately, anchored on
   the point under the cursor — waveform axes rarely share a unit.
@@ -76,6 +79,7 @@ already compiles dependencies with optimizations in dev profiles.
 | `--located` | Start with a synthetic EMP, seismic and infrasound event of known source (see [Picking and location](#picking-and-location)) |
 | `--swarm` | Start with two minutes of synthetic seismic data holding six events and glitches (see [Events](#events)) |
 | `--mixed` | Start with seven minutes of synthetic earthquakes and explosions on seismic and infrasound sensors (see [Classification](#classification)) |
+| `--catalogue` | Start with 27 minutes of 40 varied synthetic earthquakes and explosions on the same sensors, for training (see [Models](#models)) |
 | `WAVEFORM...` | Import these files (any format below) |
 | `--squiggles N` | Start with `N` demo squiggles |
 | `--samples N` | Samples per demo squiggle |
@@ -415,9 +419,12 @@ Training is offline, in Rust, outside the app:
 
 ```sh
 cargo run -p squiggle-train --release -- <dataset-dir> --out <package-dir> \
-    [--model logistic|svm|knn|tree|forest] [--name n] [--version n] \
+    [--model logistic|svm|knn|tree|forest|cnn] [--name n] [--version n] \
     [--level leaf|top] [--no-noise] [--features a,b] [--seed n] [--folds n] \
-    [--predictions events.csv]
+    [--encoder waveform|spectrogram] [--fusion late|early] [--branches a,b] \
+    [--require a] [--epochs n] [--gpu] [--predictions events.csv]
+cargo run -p squiggle-train --release --features onnx -- onnx model.onnx \
+    --out <package-dir> --features a,b --labels x,y [--name n] [--version n]
 ```
 
 It reads an exported dataset (checking its hashes), trains on the labelled
@@ -439,6 +446,31 @@ seeded and deterministic, each giving class probabilities (SVM margins
 through a softmax with a fitted scale; kNN inverse-distance votes; tree leaf
 frequencies; forest averages).
 
+**Deep models** (`--model cnn`, burn 0.22) read the dataset's waveform
+windows (`heidtmare.squiggle.windows/1`, exported with **Waveform windows**
+ticked): per phenomenology, each trace from its onset (first pick, else
+predicted from the origin; on a located event every located sensor of that
+phenomenology joins, so a missing arrival is seen as noise), resampled
+(defaults: seismic 40 Hz × 512, air 10 Hz × 256), demeaned, unit peak. Each
+phenomenology is a branch: a small 1-D CNN on the window, or a 2-D CNN on its
+log-spectrogram (`--encoder spectrogram`), pooled (mean and max) over the
+event's traces so any number of sensors fits.
+
+- `--fusion late` (default): each branch classifies alone; a learned gate
+  averages the present branches. Predictions record each branch's own
+  probabilities, shown in Features.
+- `--fusion early`: pooled branches and presence flags feed one classifier.
+
+Training drops present branches at random (`--branch-dropout`, 0.3) so a
+model still classifies when a phenomenology is missing; `--require` makes it
+abstain instead. Training runs on the CPU, or the GPU with `--gpu` (build
+with `--features gpu`); inference always runs on the CPU. Weights are
+`model.safetensors`; the spec carries the branches, window specs and fusion.
+
+**ONNX** (optional, `--features onnx` on `squiggle-train` and the app):
+`squiggle-train onnx` packages a graph taking `[1, features]` event features
+(missing as 0) and returning `[1, labels]`, run with tract.
+
 **Events ▸ Models…** imports a package folder, enables or disables models,
 and shows labels, training size, cross-validated accuracy (confusion on
 hover) and how often analysts agree (reviewed labels at or below the
@@ -447,13 +479,18 @@ package's path and hash (undoable); a package that changed on disk, or whose
 labels the project lacks, is refused, and one trained under another
 taxonomy version is flagged. **Classify** then replaces each event's
 predictions with the rules' and every enabled model's, each model computing
-features with its own recorded settings. The catalogue shows the consensus;
-the queue ranks events where models disagree first. Accepting a `noise`
-consensus rejects the event.
+features with its own recorded settings (and deep models their own
+windows); a model that abstains records nothing, and the rules can be left
+out. Each model has an ensemble **weight** (the rules count 1): the
+catalogue, the queue and Accept use the weighted consensus, and the queue
+ranks events where models disagree first. Features shows each model's
+probabilities, its fusion parts, and the ensemble. Accepting a `noise`
+consensus rejects the event. Models flags phenomenologies the project lacks.
 
-To try it: `--mixed`, Detect, Classify, accept or label all ten events,
-Export dataset, run `squiggle-train` on the folder, then Models ▸ Import
-package and Classify again.
+To try it: `--catalogue` (40 varied events), Detect, Classify, accept all
+(the rules get them right), Export dataset with waveform windows, run
+`squiggle-train` (`--model forest`, or `--model cnn`) on the folder; then
+open `--mixed`, Detect, Models ▸ Import package, and Classify.
 
 ## Transforms
 
@@ -500,7 +537,7 @@ cargo run -p squiggle-app --release -- --demo fourier --screenshot fourier.png
 ```
 squiggle-core/   model, project op log, time, samples, LOD, transforms, DSP; no dependencies (optional serde)
 squiggle-io/     readers (miniSEED, SAC, SigMF, WAV, CSV, raw), sources, SQLite project store, Parquet datasets
-squiggle-models/ classical classifiers, preprocessing, cross-validation, model packages
+squiggle-models/ classical classifiers, burn CNNs and fusion, optional ONNX (tract), cross-validation, model packages
 squiggle-train/  offline training CLI: dataset in, model package out
 squiggle-app/    the Bevy application
   src/workspace.rs   open project, async file I/O
@@ -596,7 +633,7 @@ have their own tests.
 `squiggle-io` tests each reader on synthesised files (Steim1/2 round trips,
 both SAC byte orders, SigMF pairs, raw layouts), record merging with gaps,
 source chunking, change detection, and Parquet tables with nulls and
-metadata, read back with their hashes checked. `squiggle-app` tests the mesh
+metadata, read back with their hashes checked, and safetensors windows. `squiggle-app` tests the mesh
 builder's topology, import validation, LOD bucketing, undo/redo through the
 log, the synthetic events, manual pick placement, moveout and pick alignment,
 argument parsing, event split, merge and edit rules, saving events, the M4
@@ -608,9 +645,17 @@ discriminant and all classified correctly; queue order, accept and undo;
 dataset classes, noise and subtype paths) and the M7 self-check (label the
 mixed scene, export, train logistic and forest packages, import them, and
 get exactly the trainer's probabilities in the app; analyst agreement;
-disabled models skipped; an edited package refused).
+disabled models skipped; an edited package refused) and the M8 self-check
+(detect and label the 40-event catalogue, export waveform windows, train a
+late-fusion waveform CNN and an early-fusion spectrogram CNN, get the
+trainer's probabilities exactly in the app, classify the held-out mixed scene
+with every sensor, without infrasound and without seismic; a zero-weight
+model leaves the ensemble alone).
 `squiggle-models` tests each classifier on Gaussian blobs, seeded
-determinism, median fill and standardization, stratified folds, scores, and
-package round trips with tampered weights and mismatched features refused.
-`squiggle-train` tests training every kind, leaf and top levels, noise and
-feature selection on a written dataset.
+determinism, median fill and standardization, stratified folds, scores,
+package round trips with tampered weights and mismatched features refused,
+both fusions classifying two-branch data with either branch missing,
+required branches abstaining, safetensors round trips, spectrogram bins,
+and (`--features onnx`) an ONNX graph built in the test.
+`squiggle-train` tests training every kind, CNNs on written windows, leaf
+and top levels, noise and feature selection on a written dataset.

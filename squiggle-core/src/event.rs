@@ -78,6 +78,9 @@ pub struct Prediction {
     pub taxonomy_version: u32,
     /// Sum to one, highest first.
     pub labels: Vec<(LabelId, f32)>,
+    /// Probabilities from each part of a fusion model (e.g. per phenomenology), highest first.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Vec::is_empty"))]
+    pub parts: Vec<(String, Vec<(LabelId, f32)>)>,
 }
 
 impl Prediction {
@@ -114,18 +117,27 @@ impl Event {
 
     /// Mean probabilities over models, highest first.
     pub fn consensus(&self) -> Vec<(LabelId, f32)> {
+        self.consensus_by(|_| 1.0)
+    }
+
+    /// Probabilities averaged with each model's weight (an ensemble vote), highest first.
+    pub fn consensus_by(&self, weight: impl Fn(&str) -> f32) -> Vec<(LabelId, f32)> {
         let mut sum: Vec<(LabelId, f32)> = Vec::new();
+        let mut total = 0.0;
         for prediction in &self.predictions {
+            let w = weight(&prediction.model).max(0.0);
+            total += w;
             for (label, p) in &prediction.labels {
                 match sum.iter_mut().find(|(l, _)| l == label) {
-                    Some(entry) => entry.1 += p,
-                    None => sum.push((label.clone(), *p)),
+                    Some(entry) => entry.1 += w * p,
+                    None => sum.push((label.clone(), w * p)),
                 }
             }
         }
-        let n = self.predictions.len().max(1) as f32;
-        for entry in &mut sum {
-            entry.1 /= n;
+        if total > 0.0 {
+            for entry in &mut sum {
+                entry.1 /= total;
+            }
         }
         sum.sort_by(|a, b| b.1.total_cmp(&a.1));
         sum
@@ -134,10 +146,15 @@ impl Event {
     /// Review priority in 0..=1: low consensus margin, and models whose top
     /// labels differ, rank first. Unpredicted events score 1.
     pub fn uncertainty(&self) -> f32 {
+        self.uncertainty_by(|_| 1.0)
+    }
+
+    /// [`Self::uncertainty`] over the weighted consensus.
+    pub fn uncertainty_by(&self, weight: impl Fn(&str) -> f32) -> f32 {
         if self.predictions.is_empty() {
             return 1.0;
         }
-        let consensus = self.consensus();
+        let consensus = self.consensus_by(weight);
         let margin = match consensus.as_slice() {
             [(_, a), (_, b), ..] => a - b,
             [(_, a)] => *a,

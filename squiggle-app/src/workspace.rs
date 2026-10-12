@@ -73,6 +73,8 @@ pub enum SyntheticEvent {
     Swarm,
     /// Earthquakes and explosions with their discriminating signatures.
     Mixed,
+    /// A longer, varied run of the same, for training models.
+    Catalogue,
 }
 
 pub enum SampleState {
@@ -306,6 +308,12 @@ impl Workspace {
                 let (paths, phenomenologies) = synthetic::write_mixed(&dir.join("mixed"))?.into_iter().unzip();
                 ("Synthetic earthquakes and explosions", paths, phenomenologies)
             }
+            SyntheticEvent::Catalogue => {
+                let events = synthetic::catalogue(synthetic::CATALOGUE_SEED, synthetic::CATALOGUE_EVENTS);
+                let written = synthetic::write_mixed_events(&dir.join("catalogue"), &events, synthetic::mixed_duration(&events))?;
+                let (paths, phenomenologies) = written.into_iter().unzip();
+                ("Synthetic training catalogue", paths, phenomenologies)
+            }
         };
         next.commit(Change::RenameProject { name: name.to_string() })?;
         let mut queue = ImportQueue::default();
@@ -330,9 +338,16 @@ impl Workspace {
                 next.truth_events = synthetic::SWARM.iter().map(|e| (e.source(), origin.add_seconds(e.origin))).collect();
                 return Ok(next);
             }
-            SyntheticEvent::Mixed => {
-                next.truth_events = synthetic::MIXED.iter().map(|e| (e.source(), origin.add_seconds(e.origin))).collect();
-                next.truth_labels = synthetic::MIXED.iter().map(|e| LabelId::new(e.class.label())).collect();
+            SyntheticEvent::Mixed | SyntheticEvent::Catalogue => {
+                let catalogue;
+                let events: &[synthetic::MixedEvent] = if event == SyntheticEvent::Mixed {
+                    &synthetic::MIXED
+                } else {
+                    catalogue = synthetic::catalogue(synthetic::CATALOGUE_SEED, synthetic::CATALOGUE_EVENTS);
+                    &catalogue
+                };
+                next.truth_events = events.iter().map(|e| (e.source(), origin.add_seconds(e.origin))).collect();
+                next.truth_labels = events.iter().map(|e| LabelId::new(e.class.label())).collect();
                 return Ok(next);
             }
             SyntheticEvent::Alignment => {}

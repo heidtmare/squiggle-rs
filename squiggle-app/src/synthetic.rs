@@ -13,6 +13,8 @@
 //! - [`MIXED`]: seven minutes of earthquakes and explosions on eight seismic
 //!   stations and two infrasound sensors, with the physical signatures that
 //!   tell them apart. Checks features and classification.
+//! - [`catalogue`]: the same sensors over a longer, seeded run of varied
+//!   earthquakes and explosions, for training models.
 
 use std::f64::consts::TAU;
 use std::path::PathBuf;
@@ -370,14 +372,52 @@ pub struct MixedEvent {
     pub origin: f64,
     /// Fault strike, degrees; earthquakes only. Sets the P radiation pattern.
     strike: f64,
+    /// Amplitude factor.
+    scale: f64,
+    /// Frequency factor.
+    tone: f64,
 }
 
 const fn quake(east_km: f64, north_km: f64, depth_km: f64, origin: f64, strike: f64) -> MixedEvent {
-    MixedEvent { class: Class::Earthquake, east_km, north_km, depth_km, origin, strike }
+    MixedEvent { class: Class::Earthquake, east_km, north_km, depth_km, origin, strike, scale: 1.0, tone: 1.0 }
 }
 
 const fn blast(east_km: f64, north_km: f64, depth_km: f64, origin: f64) -> MixedEvent {
-    MixedEvent { class: Class::Explosion, east_km, north_km, depth_km, origin, strike: 0.0 }
+    MixedEvent { class: Class::Explosion, east_km, north_km, depth_km, origin, strike: 0.0, scale: 1.0, tone: 1.0 }
+}
+
+/// Seed of the training catalogue.
+pub const CATALOGUE_SEED: u64 = 2026;
+pub const CATALOGUE_EVENTS: usize = 40;
+
+/// `n` events 40 s apart from 10 s, either class at random, within 5 km of
+/// [`SOURCE`], earthquakes 4–12 km and explosions 0.1–0.6 km deep, with
+/// amplitude ×0.6–1.6 and frequency ×0.8–1.25.
+pub fn catalogue(seed: u64, n: usize) -> Vec<MixedEvent> {
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut uniform = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 11) as f64 / (1u64 << 53) as f64
+    };
+    (0..n)
+        .map(|i| {
+            let class = if uniform() < 0.5 { Class::Earthquake } else { Class::Explosion };
+            let (east_km, north_km) = (10.0 * uniform() - 5.0, 10.0 * uniform() - 5.0);
+            let depth_km = match class {
+                Class::Earthquake => 4.0 + 8.0 * uniform(),
+                Class::Explosion => 0.1 + 0.5 * uniform(),
+            };
+            let strike = 180.0 * uniform();
+            MixedEvent { class, east_km, north_km, depth_km, origin: 10.0 + 40.0 * i as f64, strike, scale: 0.6 + uniform(), tone: 0.8 + 0.45 * uniform() }
+        })
+        .collect()
+}
+
+/// Seconds covering `events`.
+pub fn mixed_duration(events: &[MixedEvent]) -> f64 {
+    events.iter().map(|e| e.origin).fold(0.0, f64::max) + 50.0
 }
 
 /// Earthquakes: deep, weak and low-frequency P with a quadrant first-motion
@@ -431,15 +471,16 @@ fn wavelet(t: f64, amplitude: f64, decay: f64, f: f64, g: f64) -> f64 {
     amplitude * (1.0 - (-t / 0.01).exp()) * (-t / decay).exp() * ((TAU * f * t).sin() + 0.5 * (TAU * g * t).sin())
 }
 
-fn mixed_seismic(index: usize) -> Vec<f32> {
+fn mixed_seismic(index: usize, events: &[MixedEvent], duration: f64) -> Vec<f32> {
     let (_, east, north) = SWARM_STATIONS[index];
     let location = stored(east, north);
     let mut noise = xorshift(index as u32 + 61);
-    let len = (MIXED_DURATION * SWARM_RATE) as usize;
+    let len = (duration * SWARM_RATE) as usize;
     let mut values: Vec<f64> = (0..len).map(|_| 0.01 * noise()).collect();
-    for e in &MIXED {
+    for e in events {
         let source = e.source();
-        let scale = 1.0 / (squiggle_core::locate::slant_distance(source, &location) / 1e3).sqrt();
+        let scale = e.scale / (squiggle_core::locate::slant_distance(source, &location) / 1e3).sqrt();
+        let f = e.tone;
         let p = e.origin + travel_time(source, &location, 6000.0);
         let s = e.origin + travel_time(source, &location, 3500.0);
         // Amplitude, decay and two tones of P, then of S.
@@ -448,9 +489,9 @@ fn mixed_seismic(index: usize) -> Vec<f32> {
                 let azimuth = (east - e.east_km).atan2(north - e.north_km);
                 let radiation = (2.0 * (azimuth - e.strike.to_radians())).sin();
                 let p_amplitude = 1.5 * scale * radiation.signum() * (0.4 + 0.6 * radiation.abs());
-                ((p_amplitude, 0.4, 3.0, 5.0), (4.0 * scale, 1.0, 2.0, 3.0))
+                ((p_amplitude, 0.4, 3.0 * f, 5.0 * f), (4.0 * scale, 1.0, 2.0 * f, 3.0 * f))
             }
-            Class::Explosion => ((3.0 * scale, 0.3, 10.0, 14.0), (0.6 * scale, 0.6, 6.0, 7.0)),
+            Class::Explosion => ((3.0 * scale, 0.3, 10.0 * f, 14.0 * f), (0.6 * scale, 0.6, 6.0 * f, 7.0 * f)),
         };
         let from = (p * SWARM_RATE) as usize;
         let to = ((s + 8.0) * SWARM_RATE).min(len as f64) as usize;
@@ -462,17 +503,17 @@ fn mixed_seismic(index: usize) -> Vec<f32> {
     values.into_iter().map(|v| v as f32).collect()
 }
 
-fn mixed_infrasound(index: usize) -> Vec<f32> {
+fn mixed_infrasound(index: usize, events: &[MixedEvent], duration: f64) -> Vec<f32> {
     let (_, east, north) = MIXED_INFRASOUND[index];
     let location = stored(east, north);
     let mut noise = xorshift(index as u32 + 71);
-    let len = (MIXED_DURATION * INFRASOUND_RATE) as usize;
-    let arrivals: Vec<(f64, f64)> = MIXED
+    let len = (duration * INFRASOUND_RATE) as usize;
+    let arrivals: Vec<(f64, f64)> = events
         .iter()
         .filter(|e| e.class == Class::Explosion)
         .map(|e| {
             let distance = squiggle_core::locate::slant_distance(e.source(), &location);
-            (e.origin + distance / 340.0, 2.0 / (distance / 1e3).sqrt())
+            (e.origin + distance / 340.0, 2.0 * e.scale / (distance / 1e3).sqrt())
         })
         .collect();
     (0..len)
@@ -493,18 +534,23 @@ fn mixed_infrasound(index: usize) -> Vec<f32> {
 
 /// Writes the mixed scene as SAC with coordinates: seismic, then infrasound.
 pub fn write_mixed(dir: &std::path::Path) -> Result<Vec<(PathBuf, &'static str)>, String> {
+    write_mixed_events(dir, &MIXED, MIXED_DURATION)
+}
+
+/// Writes `events` over `duration` seconds on the mixed scene's sensors.
+pub fn write_mixed_events(dir: &std::path::Path, events: &[MixedEvent], duration: f64) -> Result<Vec<(PathBuf, &'static str)>, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let origin: Timestamp = ORIGIN.parse().expect("valid constant");
     let mut paths = Vec::new();
     for (index, &(station, east, north)) in SWARM_STATIONS.iter().enumerate() {
         let path = dir.join(format!("SY.{station}..HHZ.sac"));
-        let bytes = squiggle_io::sac::encode(&mixed_seismic(index), origin, SWARM_RATE, ["SY", station, "", "HHZ"], Some(offset_location(east, north)));
+        let bytes = squiggle_io::sac::encode(&mixed_seismic(index, events, duration), origin, SWARM_RATE, ["SY", station, "", "HHZ"], Some(offset_location(east, north)));
         write_atomic(&path, &bytes)?;
         paths.push((path, "seismic"));
     }
     for (index, &(station, east, north)) in MIXED_INFRASOUND.iter().enumerate() {
         let path = dir.join(format!("SY.{station}..BDF.sac"));
-        let bytes = squiggle_io::sac::encode(&mixed_infrasound(index), origin, INFRASOUND_RATE, ["SY", station, "", "BDF"], Some(offset_location(east, north)));
+        let bytes = squiggle_io::sac::encode(&mixed_infrasound(index, events, duration), origin, INFRASOUND_RATE, ["SY", station, "", "BDF"], Some(offset_location(east, north)));
         write_atomic(&path, &bytes)?;
         paths.push((path, "infrasound"));
     }

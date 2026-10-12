@@ -1,15 +1,25 @@
-//! `squiggle-train <dataset> --out <package> [options]`: see `USAGE`.
+//! `squiggle-train <dataset> --out <package> [options]`, or
+//! `squiggle-train onnx <model.onnx> --out <package> …`: see `USAGE`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use squiggle_models::Kind;
-use squiggle_train::{Dataset, Level, Options, predictions, train};
+use squiggle_models::deep::{Encoder, Fusion};
+use squiggle_train::{Dataset, Level, Method, Options, predictions, train};
 
 const USAGE: &str = "\
 usage: squiggle-train <dataset-dir> --out <package-dir> [options]
+       squiggle-train onnx <model.onnx> --out <package-dir> --features <a,b,…> --labels <x,y,…>
+                      [--name <name>] [--version <n>] [--taxonomy-version <n>]   (onnx feature)
 
-  --model <kind>        logistic | svm | knn | tree | forest (default forest)
+  --model <kind>        logistic | svm | knn | tree | forest on event features,
+                        or cnn on waveform windows (default forest)
+  --encoder <e>         cnn: waveform (1-D) | spectrogram (2-D) (default waveform)
+  --fusion <f>          cnn: late (per-phenomenology heads, gated) | early (joint head) (default late)
+  --branches <a,b,…>    cnn: phenomenologies to use (default every one with windows)
+  --require <a,b,…>     cnn: phenomenologies a prediction needs (default none)
+  --gpu                 cnn: train on the GPU (gpu feature)
   --name <name>         model name (default: the kind)
   --version <n>         model version (default 1)
   --level <level>       leaf (analyst label) | top (root ancestor) (default leaf)
@@ -18,6 +28,7 @@ usage: squiggle-train <dataset-dir> --out <package-dir> [options]
   --seed <n>            random seed (default 1)
   --folds <n>           cross-validation folds, at most the smallest class (default 5)
   --l2 <x> --iterations <n> --rate <x> --k <n> --max-depth <n> --min-leaf <n> --trees <n>
+  --epochs <n> --batch <n> --learning-rate <x> --branch-dropout <x> --width <n> --hidden <n>
                         hyperparameters
   --predictions <file>  also write each event's probabilities as CSV";
 
@@ -31,17 +42,26 @@ fn main() -> ExitCode {
     }
 }
 
+fn list(v: String) -> Vec<String> {
+    v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+}
+
+fn number<T: std::str::FromStr>(arg: &str, v: String) -> Result<T, String> {
+    v.parse().map_err(|_| format!("{arg}: not a number: {v}"))
+}
+
 fn run(args: Vec<String>) -> Result<(), String> {
+    if args.first().map(String::as_str) == Some("onnx") {
+        return onnx(args.into_iter().skip(1).collect());
+    }
     let mut options = Options::default();
+    let (mut encoder, mut fusion, mut cnn) = (Encoder::Waveform, Fusion::Late, false);
     let mut dataset: Option<PathBuf> = None;
     let mut out: Option<PathBuf> = None;
     let mut csv: Option<PathBuf> = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
-        fn number<T: std::str::FromStr>(arg: &str, v: String) -> Result<T, String> {
-            v.parse().map_err(|_| format!("{arg}: not a number: {v}"))
-        }
         match arg.as_str() {
             "-h" | "--help" => {
                 println!("{USAGE}");
@@ -50,8 +70,28 @@ fn run(args: Vec<String>) -> Result<(), String> {
             "--out" => out = Some(value()?.into()),
             "--model" => {
                 let v = value()?;
-                options.kind = Kind::parse(&v).ok_or_else(|| format!("unknown model {v}"))?;
+                cnn = v == "cnn";
+                if !cnn {
+                    options.method = Method::Classical(Kind::parse(&v).ok_or_else(|| format!("unknown model {v}"))?);
+                }
             }
+            "--encoder" => {
+                let v = value()?;
+                encoder = Encoder::parse(&v).ok_or_else(|| format!("unknown encoder {v}"))?;
+            }
+            "--fusion" => {
+                let v = value()?;
+                fusion = Fusion::parse(&v).ok_or_else(|| format!("unknown fusion {v}"))?;
+            }
+            "--branches" => options.branches = Some(list(value()?)),
+            "--require" => options.require = list(value()?),
+            "--gpu" => options.gpu = true,
+            "--epochs" => options.params.epochs = number(&arg, value()?)?,
+            "--batch" => options.params.batch = number(&arg, value()?)?,
+            "--learning-rate" => options.params.learning_rate = number(&arg, value()?)?,
+            "--branch-dropout" => options.params.branch_dropout = number(&arg, value()?)?,
+            "--width" => options.params.width = number(&arg, value()?)?,
+            "--hidden" => options.params.hidden = number(&arg, value()?)?,
             "--name" => options.name = Some(value()?),
             "--version" => options.version = number(&arg, value()?)?,
             "--level" => {
@@ -62,7 +102,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 }
             }
             "--no-noise" => options.noise = false,
-            "--features" => options.features = Some(value()?.split(',').map(|s| s.trim().to_string()).collect()),
+            "--features" => options.features = Some(list(value()?)),
             "--seed" => options.seed = number(&arg, value()?)?,
             "--folds" => options.folds = number(&arg, value()?)?,
             "--l2" => options.params.l2 = number(&arg, value()?)?,
@@ -81,6 +121,9 @@ fn run(args: Vec<String>) -> Result<(), String> {
     let (Some(dataset), Some(out)) = (dataset, out) else {
         return Err(USAGE.to_string());
     };
+    if cnn {
+        options.method = Method::Cnn { encoder, fusion };
+    }
 
     let dataset = Dataset::load(&dataset)?;
     let package = train(&dataset, &options)?;
@@ -107,11 +150,47 @@ fn run(args: Vec<String>) -> Result<(), String> {
     if let Some(path) = csv {
         let mut text = format!("event,{}\n", spec.output.labels.join(","));
         for (event, p) in predictions(&package, &dataset) {
-            let cells: Vec<String> = p.iter().map(|v| v.to_string()).collect();
+            let cells: Vec<String> = match p {
+                Some(p) => p.iter().map(|v| v.to_string()).collect(),
+                None => vec![String::new(); spec.output.labels.len()],
+            };
             text.push_str(&format!("{event},{}\n", cells.join(",")));
         }
         std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
         println!("predictions → {}", path.display());
     }
     Ok(())
+}
+
+#[cfg(feature = "onnx")]
+fn onnx(args: Vec<String>) -> Result<(), String> {
+    let (mut model, mut out, mut features, mut labels) = (None::<PathBuf>, None::<PathBuf>, Vec::new(), Vec::new());
+    let (mut name, mut version, mut taxonomy) = ("onnx".to_string(), 1u32, 0u32);
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
+        match arg.as_str() {
+            "--out" => out = Some(value()?.into()),
+            "--features" => features = list(value()?),
+            "--labels" => labels = list(value()?),
+            "--name" => name = value()?,
+            "--version" => version = number(&arg, value()?)?,
+            "--taxonomy-version" => taxonomy = number(&arg, value()?)?,
+            _ if arg.starts_with('-') => return Err(format!("unknown option {arg}\n{USAGE}")),
+            _ => model = Some(arg.into()),
+        }
+    }
+    let (Some(model), Some(out)) = (model, out) else {
+        return Err(USAGE.to_string());
+    };
+    let bytes = std::fs::read(&model).map_err(|e| format!("{}: {e}", model.display()))?;
+    let package = squiggle_train::package_onnx(bytes, features, labels, &name, version, taxonomy)?;
+    package.save(&out)?;
+    println!("{} → {}", package.spec.id, out.display());
+    Ok(())
+}
+
+#[cfg(not(feature = "onnx"))]
+fn onnx(_: Vec<String>) -> Result<(), String> {
+    Err("ONNX packaging needs squiggle-train built with --features onnx".to_string())
 }

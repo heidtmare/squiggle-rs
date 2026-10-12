@@ -1,5 +1,6 @@
-//! Training datasets: an events table and a members table as Parquet, plus a
-//! `dataset.json` manifest naming the feature set, taxonomy and class counts.
+//! Training datasets: an events table and a members table as Parquet,
+//! optionally aligned waveform windows as safetensors, plus a `dataset.json`
+//! manifest naming the feature set, window specs, taxonomy and class counts.
 //! `squiggle-train` reads this layout. Missing feature values are nulls.
 
 use std::collections::HashMap;
@@ -16,11 +17,13 @@ use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
 use squiggle_core::Label;
 use squiggle_core::features::FeatureSettings;
+use squiggle_core::windows::{WINDOW_SET, WindowSpec};
 
 pub const FORMAT: &str = "heidtmare.squiggle.dataset/1";
 pub const EVENTS_FILE: &str = "events.parquet";
 pub const MEMBERS_FILE: &str = "members.parquet";
 pub const MANIFEST_FILE: &str = "dataset.json";
+pub const WINDOWS_FILE: &str = "windows.safetensors";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Values {
@@ -147,6 +150,9 @@ pub struct Manifest {
     /// Settings the features were computed with.
     #[serde(default)]
     pub feature_settings: Option<FeatureSettings>,
+    /// One per phenomenology with windows; empty when windows were not exported.
+    #[serde(default)]
+    pub windows: Vec<WindowSpec>,
     pub event_features: Vec<String>,
     pub member_features: Vec<String>,
     /// Events per class (`null` for unlabelled).
@@ -157,8 +163,61 @@ pub struct Manifest {
     pub hashes: Vec<(String, String)>,
 }
 
-/// Writes both tables and the manifest into `dir`. Fills the manifest's row counts and hashes.
-pub fn write_dataset(dir: &Path, events: &Table, members: &Table, mut manifest: Manifest) -> Result<Manifest, String> {
+/// One phenomenology's windows: `events.len()` rows of `samples` values.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowTable {
+    pub phenomenology: String,
+    pub samples: usize,
+    /// Row-major, `events.len() * samples`.
+    pub values: Vec<f32>,
+    /// Row in the events table of each window.
+    pub events: Vec<i64>,
+}
+
+/// Writes `tables` as `<phenomenology>.windows` (F32, rows × samples) and `<phenomenology>.events` (I64).
+pub fn write_windows(path: &Path, tables: &[WindowTable]) -> Result<(), String> {
+    use safetensors::{Dtype, tensor::TensorView};
+    let bytes: Vec<(String, Vec<u8>, Vec<usize>, Dtype)> = tables
+        .iter()
+        .flat_map(|t| {
+            [
+                (format!("{}.windows", t.phenomenology), t.values.iter().flat_map(|v| v.to_le_bytes()).collect(), vec![t.events.len(), t.samples], Dtype::F32),
+                (format!("{}.events", t.phenomenology), t.events.iter().flat_map(|v| v.to_le_bytes()).collect(), vec![t.events.len()], Dtype::I64),
+            ]
+        })
+        .collect();
+    let views = bytes
+        .iter()
+        .map(|(name, data, shape, dtype)| TensorView::new(*dtype, shape.clone(), data).map(|v| (name.clone(), v)))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let metadata = HashMap::from([("format".to_string(), FORMAT.to_string()), ("window_set".to_string(), WINDOW_SET.to_string())]);
+    let out = safetensors::serialize(views, Some(metadata)).map_err(|e| e.to_string())?;
+    std::fs::write(path, out).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+pub fn read_windows(path: &Path) -> Result<Vec<WindowTable>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let file = safetensors::SafeTensors::deserialize(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut names: Vec<&str> = file.names().into_iter().filter_map(|n| n.strip_suffix(".windows")).collect();
+    names.sort_unstable();
+    names
+        .into_iter()
+        .map(|p| {
+            let windows = file.tensor(&format!("{p}.windows")).map_err(|e| e.to_string())?;
+            let events = file.tensor(&format!("{p}.events")).map_err(|e| e.to_string())?;
+            Ok(WindowTable {
+                phenomenology: p.to_string(),
+                samples: windows.shape().get(1).copied().unwrap_or(0),
+                values: windows.data().chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().expect("4 bytes"))).collect(),
+                events: events.data().chunks_exact(8).map(|c| i64::from_le_bytes(c.try_into().expect("8 bytes"))).collect(),
+            })
+        })
+        .collect()
+}
+
+/// Writes both tables, any windows, and the manifest into `dir`. Fills the manifest's row counts and hashes.
+pub fn write_dataset(dir: &Path, events: &Table, members: &Table, windows: &[WindowTable], mut manifest: Manifest) -> Result<Manifest, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let metadata = HashMap::from([
         ("format".to_string(), FORMAT.to_string()),
@@ -172,6 +231,12 @@ pub fn write_dataset(dir: &Path, events: &Table, members: &Table, mut manifest: 
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         manifest.hashes.push((name.to_string(), blake3::hash(&bytes).to_hex().to_string()));
     }
+    if !windows.is_empty() {
+        let path = dir.join(WINDOWS_FILE);
+        write_windows(&path, windows)?;
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        manifest.hashes.push((WINDOWS_FILE.to_string(), blake3::hash(&bytes).to_hex().to_string()));
+    }
     manifest.events = events.rows();
     manifest.members = members.rows();
     let json = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
@@ -180,7 +245,8 @@ pub fn write_dataset(dir: &Path, events: &Table, members: &Table, mut manifest: 
     Ok(manifest)
 }
 
-/// Reads a dataset written by [`write_dataset`], checking each table against its hash.
+/// Reads a dataset's tables and manifest written by [`write_dataset`],
+/// checking every file against its hash; windows are read with [`read_windows`].
 pub fn read_dataset(dir: &Path) -> Result<(Table, Table, Manifest), String> {
     let path = dir.join(MANIFEST_FILE);
     let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -188,18 +254,20 @@ pub fn read_dataset(dir: &Path) -> Result<(Table, Table, Manifest), String> {
     if manifest.format != FORMAT {
         return Err(format!("format {} is not {FORMAT}", manifest.format));
     }
-    let mut tables = Vec::new();
-    for name in [EVENTS_FILE, MEMBERS_FILE] {
+    let mut names = vec![EVENTS_FILE, MEMBERS_FILE];
+    if !manifest.windows.is_empty() {
+        names.push(WINDOWS_FILE);
+    }
+    for name in names {
         let path = dir.join(name);
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let expected = manifest.hashes.iter().find(|h| h.0 == name).map(|h| h.1.as_str());
         if expected != Some(blake3::hash(&bytes).to_hex().as_str()) {
             return Err(format!("{name} does not match the manifest's hash"));
         }
-        tables.push(read_parquet(&path)?);
     }
-    let members = tables.pop().unwrap_or_default();
-    let events = tables.pop().unwrap_or_default();
+    let tables = [read_parquet(&dir.join(EVENTS_FILE))?, read_parquet(&dir.join(MEMBERS_FILE))?];
+    let [events, members] = tables;
     Ok((events, members, manifest))
 }
 
@@ -225,6 +293,7 @@ mod tests {
             labels: squiggle_core::taxonomy::seed(),
             noise_class: squiggle_core::taxonomy::NOISE.into(),
             feature_settings: Some(FeatureSettings::default()),
+            windows: vec![WindowSpec { phenomenology: squiggle_core::PhenomenologyId::new("seismic"), rate: 40.0, pre_s: 1.0, samples: 3, max_traces: 4 }],
             event_features: vec!["p_s_log".into()],
             member_features: vec![],
             classes: vec![],
@@ -232,8 +301,10 @@ mod tests {
             members: 0,
             hashes: vec![],
         };
-        let written = write_dataset(dir.path(), &events, &members, manifest).unwrap();
-        assert_eq!((written.events, written.members, written.hashes.len()), (3, 1, 2));
+        let windows = vec![WindowTable { phenomenology: "seismic".into(), samples: 3, values: vec![0.0, 1.0, -1.0, 0.5, 0.25, 0.0], events: vec![0, 2] }];
+        let written = write_dataset(dir.path(), &events, &members, &windows, manifest).unwrap();
+        assert_eq!((written.events, written.members, written.hashes.len()), (3, 1, 3));
+        assert_eq!(read_windows(&dir.path().join(WINDOWS_FILE)).unwrap(), windows);
 
         let file = File::open(dir.path().join(EVENTS_FILE)).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();

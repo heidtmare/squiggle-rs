@@ -504,6 +504,20 @@ impl Project {
         self.models.iter().find(|m| m.id == id)
     }
 
+    /// Ensemble weight of `model`'s predictions: its reference's, else 1 (the rules).
+    pub fn model_weight(&self, model: &str) -> f32 {
+        self.model(model).map_or(1.0, |m| m.weight)
+    }
+
+    /// `event`'s weighted ensemble vote, highest first.
+    pub fn consensus(&self, event: &Event) -> Vec<(LabelId, f32)> {
+        event.consensus_by(|m| self.model_weight(m))
+    }
+
+    pub fn uncertainty(&self, event: &Event) -> f32 {
+        event.uncertainty_by(|m| self.model_weight(m))
+    }
+
     /// Seed labels for a project saved before labels existed.
     pub fn seed_taxonomy(&self) -> Vec<Change> {
         if self.taxonomy.version > 0 {
@@ -707,6 +721,7 @@ mod tests {
             config_hash: "x".into(),
             taxonomy_version: 1,
             labels: vec![(LabelId::new("earthquake"), 0.7), (LabelId::new("explosion"), 0.3)],
+            parts: vec![],
         };
         let set = Change::SetPredictions { event: labelled.id, predictions: vec![prediction] };
         let undo_prediction = project.inverse(&set).unwrap();
@@ -727,7 +742,7 @@ mod tests {
     #[test]
     fn models_are_referenced_and_undo() {
         let (mut project, _) = Project::create("p", &analyst());
-        let model = ModelRef { id: "m@1".into(), path: "/m".into(), hash: "h".into(), enabled: true };
+        let model = ModelRef { id: "m@1".into(), path: "/m".into(), hash: "h".into(), enabled: true, weight: 1.0 };
         let undo_add = project.inverse(&Change::SetModel(model.clone())).unwrap();
         project.commit(&analyst(), Change::SetModel(model.clone())).unwrap();
         let disabled = ModelRef { enabled: false, ..model.clone() };
