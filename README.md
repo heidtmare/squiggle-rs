@@ -44,6 +44,12 @@ them through Fourier and wavelet transforms without leaving the plot.
   can be packaged too. The app imports packages and runs inference only,
   recording each model's prediction on every event and combining them in a
   weighted ensemble.
+- **Live feeds.** A framed TCP stream (`heidtmare.squiggle.stream/1`) is
+  recorded to disk as it arrives, plotted as it grows (level of detail
+  appended, never rebuilt), followed at the right edge, and detected on a
+  sliding window: each event is added once no later arrival could change it,
+  giving exactly the events of the whole recording. `squiggle-stream`
+  replays files as a feed.
 - **Similarity and clusters.** A template library curated by analysts:
   events match templates by network cross-correlation, which votes their
   labels, and a matched filter finds weak repeats. An offline PCA and DBSCAN
@@ -87,6 +93,8 @@ already compiles dependencies with optimizations in dev profiles.
 | `--mixed` | Start with seven minutes of synthetic earthquakes and explosions on seismic and infrasound sensors (see [Classification](#classification)) |
 | `--catalogue` | Start with 27 minutes of 40 varied synthetic earthquakes and explosions on the same sensors, for training (see [Models](#models)) |
 | `--families` | Start with 16 minutes of repeats from two quarries and two earthquake swarms, one weak repeat each (see [Templates and clusters](#templates-and-clusters)) |
+| `--live HOST:PORT` | Connect to a live feed (see [Live feeds](#live-feeds)) |
+| `--live-demo` | Start with the event families replayed live at ×10 |
 | `WAVEFORM...` | Import these files (any format below) |
 | `--squiggles N` | Start with `N` demo squiggles |
 | `--samples N` | Samples per demo squiggle |
@@ -561,6 +569,45 @@ family from its templates (one weak quarry abstains). Label the events,
 export, and `squiggle-train cluster` finds the four families (adjusted Rand
 index 0.89, the two weak quarry repeats unclustered).
 
+## Live feeds
+
+**Project ▸ Live feed…** connects to a `heidtmare.squiggle.stream/1` server:
+after a `SQGL` greeting, frames of a type byte and a `u32` length carry a
+JSON channel header (code, start, rate, real or I/Q, position), chunks of
+little-endian f32 samples, gaps and an end. Replay any waveform files as a
+feed, paced by their timestamps:
+
+```sh
+cargo run -p squiggle-io --release --bin squiggle-stream -- <files…> [--port 18000] [--speed 10] [--chunk 0.5]
+```
+
+- **Recording.** Each channel is appended to a raw f32 file beside the saved
+  project (`<project>.live/<session>/`, else the temp directory) and is a
+  stream trace in the project. Every 10 s and when the feed stops, the
+  project records the length and the BLAKE3 of the bytes so far
+  (`ExtendTrace`); a reopened project loads exactly that much, so samples
+  written after the last checkpoint are ignored, not refused. A
+  channel's sensor is matched by code (added with its position when new); a new sensor's suggested
+  phenomenology (from its channel code) waits for **Assign the suggested
+  phenomenologies**, so it is recorded but not processed until then.
+- **Display.** Tracks grow as samples arrive: unprocessed series and their
+  min/max pyramid are extended in place; processed ones are rebuilt at most
+  once a second. **Follow live** keeps the newest sample at the right edge.
+- **Detection** (on by default): each assigned trace streams through its
+  phenomenology's default detector, plus the matched filter where library
+  templates exist; onsets are refined once the samples AIC reads exist. Open
+  arrivals are associated over a sliding window. A candidate becomes an event
+  (one undoable command) once every trace has settled past its first arrival
+  plus a horizon (the longest any arrival can follow it: the radius over the
+  slowest speed plus phase spread, 152 s with infrasound at 50 km), so the
+  events equal those of detecting the whole recording. A trace silent for
+  30 s of feed time does not hold events open. Stopping closes the rest.
+
+**Demo ▸ Live replay of event families** (or `--live-demo`) opens a new
+project, serves the families scene locally at ×10 and connects, assigning
+the suggested phenomenologies; events appear about 15 s (152 s of feed)
+after they occur.
+
 ## Transforms
 
 The **Transform** menu turns each selected squiggle into new ones, added to
@@ -605,7 +652,8 @@ cargo run -p squiggle-app --release -- --demo fourier --screenshot fourier.png
 
 ```
 squiggle-core/   model, project op log, time, samples, LOD, transforms, DSP; no dependencies (optional serde)
-squiggle-io/     readers (miniSEED, SAC, SigMF, WAV, CSV, raw), sources, SQLite project store, Parquet datasets
+squiggle-io/     readers (miniSEED, SAC, SigMF, WAV, CSV, raw), sources, live TCP feeds and recording, SQLite project store, Parquet datasets
+  src/bin/squiggle-stream.rs   replays files as a live feed
 squiggle-models/ classical classifiers, burn CNNs and fusion, optional ONNX (tract), PCA and DBSCAN, cross-validation, model packages
 squiggle-train/  offline training CLI: dataset in, model package out
 squiggle-app/    the Bevy application
@@ -619,6 +667,8 @@ squiggle-app/    the Bevy application
   src/models_ui.rs   model registry and manager, agreement by version
   src/templates_ui.rs template library
   src/scatter_ui.rs  feature and embedding scatter, lasso, bulk labels
+  src/live.rs        streaming detection and sliding-window association
+  src/live_ui.rs     live feed session: recording, checkpoints, follow, demo replay
   src/synthetic.rs   synthetic alignment, located, swarm, mixed, catalogue and family scenes
   src/project_ui.rs  import, sensor and phenomenology windows
   assets/shaders/squiggle_line.wgsl   screen-space polyline expansion
@@ -704,7 +754,10 @@ have their own tests.
 `squiggle-io` tests each reader on synthesised files (Steim1/2 round trips,
 both SAC byte orders, SigMF pairs, raw layouts), record merging with gaps,
 source chunking, change detection, and Parquet tables with nulls and
-metadata, read back with their hashes checked, and safetensors windows. `squiggle-app` tests the mesh
+metadata, read back with their hashes checked, and safetensors windows,
+stream frames round-tripping real and I/Q channels, a replay over TCP,
+refused bad and truncated feeds, and recordings reloading to their
+checkpoint. `squiggle-app` tests the mesh
 builder's topology, import validation, LOD bucketing, undo/redo through the
 log, the synthetic events, manual pick placement, moveout and pick alignment,
 argument parsing, event split, merge and edit rules, saving events, the M4
@@ -727,7 +780,12 @@ and the matched filter find every repeat once, reviewed events are not
 detected again, templates vote every repeat's family, an offline cluster
 package recovers the families (adjusted Rand ≥ 0.8) and assigns events in
 the app as in the trainer, a cluster relabels in bulk and undoes, and
-agreement is tracked per model).
+agreement is tracked per model) and the Phase 10 self-check (the swarm and
+the families, with templates and matched filters, fed in half-second chunks
+through streaming detection give exactly the events of detecting the whole
+files, each due event closing before the feed ends; a served replay is
+recorded, checkpointed and reloads sample for sample). Growing series match
+ones built whole.
 `squiggle-models` tests each classifier on Gaussian blobs, seeded
 determinism, median fill and standardization, stratified folds, scores,
 package round trips with tampered weights and mismatched features refused,

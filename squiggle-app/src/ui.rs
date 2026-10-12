@@ -23,6 +23,7 @@ use crate::classify_ui::{self, ClassifyWindows};
 use crate::events_ui::{self, EventWindows};
 use crate::locate_ui::{self, LocateWindows};
 use crate::models_ui::{self, ModelRegistry, ModelWindows};
+use crate::live_ui::{self, LiveState};
 use crate::scatter_ui::{self, ScatterWindows};
 use crate::templates_ui::{self, TemplateWindows};
 use crate::process_ui::{self, ProcessWindows};
@@ -54,6 +55,9 @@ impl Plugin for UiPlugin {
             .init_resource::<ModelRegistry>()
             .init_resource::<TemplateWindows>()
             .init_resource::<ScatterWindows>()
+            .init_resource::<LiveState>()
+            .add_systems(Startup, live_ui::startup)
+            .add_systems(Update, live_ui::poll_live)
             .add_systems(Startup, setup)
             .add_systems(
                 EguiPrimaryContextPass,
@@ -67,6 +71,7 @@ impl Plugin for UiPlugin {
                     models_ui::windows,
                     templates_ui::windows,
                     scatter_ui::windows,
+                    live_ui::window,
                     classify_ui::windows,
                 )
                     .chain(),
@@ -98,6 +103,7 @@ pub struct TrackAccess<'w, 's> {
     models: ResMut<'w, ModelWindows>,
     templates: ResMut<'w, TemplateWindows>,
     scatter: ResMut<'w, ScatterWindows>,
+    live: ResMut<'w, LiveState>,
 }
 
 /// Which parts of the chrome are open.
@@ -322,7 +328,11 @@ fn menu_bar(
                 ui.close();
             }
         });
-        ui.menu_button("Project", |ui| project_ui::project_menu(ui, project));
+        ui.menu_button("Project", |ui| {
+            project_ui::project_menu(ui, project);
+            ui.separator();
+            live_ui::live_menu(ui, &mut tracks.live);
+        });
         ui.menu_button("Process", |ui| {
             process_ui::process_menu(ui, &mut tracks.process, &mut tracks.view);
             ui.separator();
@@ -394,6 +404,14 @@ fn menu_bar(
                 .clicked()
             {
                 project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Families));
+                ui.close();
+            }
+            if ui
+                .button("Live replay of event families")
+                .on_hover_text(format!("A new project fed live, at ×{}, by a local replay of the event families: recorded, plotted and detected as it arrives", live_ui::DEMO_SPEED))
+                .clicked()
+            {
+                live_ui::request_demo(&mut tracks.live, &mut project.requests);
                 ui.close();
             }
             ui.separator();

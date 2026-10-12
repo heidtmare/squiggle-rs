@@ -37,6 +37,10 @@ pub struct DemoOptions {
     pub import: Vec<std::path::PathBuf>,
     /// Start with a synthetic event.
     pub synthetic: Option<SyntheticEvent>,
+    /// Connect to this live feed (`host:port`).
+    pub live: Option<String>,
+    /// Start with a live replay of the event families.
+    pub live_demo: bool,
 }
 
 impl Default for DemoOptions {
@@ -49,12 +53,15 @@ impl Default for DemoOptions {
             project: None,
             import: Vec::new(),
             synthetic: None,
+            live: None,
+            live_demo: false,
         }
     }
 }
 
 pub const USAGE: &str = "\
-Usage: squiggle-app [--project FILE | --synthetic | --located | --swarm | --mixed | --catalogue | --families] [--squiggles N] [--samples N]
+Usage: squiggle-app [--project FILE | --synthetic | --located | --swarm | --mixed | --catalogue | --families]
+                    [--live HOST:PORT | --live-demo] [--squiggles N] [--samples N]
                     [--demo SCENE] [--screenshot FILE] [WAVEFORM...]
 
   WAVEFORM...        import these files at startup (miniSEED, SAC, SigMF,
@@ -72,6 +79,8 @@ Usage: squiggle-app [--project FILE | --synthetic | --located | --swarm | --mixe
                      explosions on the same sensors (training data for models)
   --families         start with 16 minutes of repeats from four source families,
                      one weak repeat each (clustering and template demo)
+  --live HOST:PORT   connect to a live feed (heidtmare.squiggle.stream/1)
+  --live-demo        start with the event families replayed live at ×10
   --squiggles N      put N squiggles on the plot at startup (default 0)
   --samples N        samples per generated squiggle (default 1000)
   --demo SCENE       open a transform demo: fourier or wavelet
@@ -119,6 +128,8 @@ impl DemoOptions {
                 "--mixed" => options.synthetic = Some(SyntheticEvent::Mixed),
                 "--catalogue" => options.synthetic = Some(SyntheticEvent::Catalogue),
                 "--families" => options.synthetic = Some(SyntheticEvent::Families),
+                "--live" => options.live = Some(args.next().ok_or_else(|| format!("{argument} needs host:port"))?),
+                "--live-demo" => options.live_demo = true,
                 "--help" | "-h" => return Err(USAGE.to_string()),
                 other if other.starts_with('-') => {
                     return Err(format!("unrecognised argument: {other}\n\n{USAGE}"));
@@ -260,6 +271,9 @@ mod tests {
         assert_eq!(parse(&["--mixed"]).unwrap().synthetic, Some(SyntheticEvent::Mixed));
         assert_eq!(parse(&["--catalogue"]).unwrap().synthetic, Some(SyntheticEvent::Catalogue));
         assert_eq!(parse(&["--families"]).unwrap().synthetic, Some(SyntheticEvent::Families));
+        assert_eq!(parse(&["--live", "h:1"]).unwrap().live.as_deref(), Some("h:1"));
+        assert!(parse(&["--live-demo"]).unwrap().live_demo);
+        assert!(parse(&["--live"]).is_err());
     }
 
     #[test]

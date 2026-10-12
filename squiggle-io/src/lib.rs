@@ -13,6 +13,7 @@ pub mod sac;
 mod sigmf;
 mod source;
 mod store;
+pub mod stream;
 mod wav;
 
 use core::fmt;
@@ -179,7 +180,9 @@ pub fn read_raw(path: &Path, layout: RawLayout) -> Result<FileRead, ReadError> {
 
 /// Reopens a trace's file as a source, refusing one that changed since import.
 pub fn open_source(source: &TraceSource) -> Result<FileSource, ReadError> {
-    let TraceSource::File { path, format, content_hash: expected, layout, .. } = source;
+    let TraceSource::File { path, format, content_hash: expected, layout, .. } = source else {
+        return Err(ReadError::Format("a stream recording has no file source; use load_trace".to_string()));
+    };
     let path = Path::new(path);
     let bytes = std::fs::read(path)?;
     let recordings = if format == raw::FORMAT {
@@ -198,9 +201,19 @@ pub fn open_source(source: &TraceSource) -> Result<FileSource, ReadError> {
     Ok(FileSource::new(recordings))
 }
 
-/// Reloads one trace's samples through its source.
+/// Reloads a trace's samples: from its file, or its stream recording.
+pub fn load_trace(trace: &squiggle_core::Trace) -> Result<TraceSamples, ReadError> {
+    match &trace.source {
+        TraceSource::Stream { .. } => stream::load_stream(&trace.source, trace.kind),
+        file => load_samples(file),
+    }
+}
+
+/// Reloads one file trace's samples through its source.
 pub fn load_samples(source: &TraceSource) -> Result<TraceSamples, ReadError> {
-    let TraceSource::File { channel, .. } = source;
+    let TraceSource::File { channel, .. } = source else {
+        return Err(ReadError::Format("a stream recording needs its sample kind; use load_trace".to_string()));
+    };
     ingest(&mut open_source(source)?)?
         .into_iter()
         .find(|(header, _)| header.channel == *channel)

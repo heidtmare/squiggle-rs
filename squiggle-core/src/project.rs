@@ -11,7 +11,7 @@ use crate::id::Id;
 use crate::locate::Origin;
 use crate::model::ModelRef;
 use crate::phenomenology::{self, Phenomenology, PhenomenologyId};
-use crate::sensor::{Alignment, Analyst, Assignment, ClockCorrection, Location, Pick, Provenance, Sensor, Trace};
+use crate::sensor::{Alignment, Analyst, Assignment, ClockCorrection, Location, Pick, Provenance, Sensor, Trace, TraceSource};
 use crate::taxonomy::{self, Label, LabelId, Taxonomy};
 use crate::template::Template;
 use crate::time::Timestamp;
@@ -47,6 +47,8 @@ pub enum Change {
     AddTrace(Trace),
     /// Also removes the trace's picks and event memberships.
     RemoveTrace { trace: Id },
+    /// A stream-recorded trace grew: its length and the recorded bytes and their hash.
+    ExtendTrace { trace: Id, len: usize, bytes: u64, content_hash: String },
     /// Requires an assigned phenomenology and a filter valid at the trace's rate.
     SetProcessing { trace: Id, processing: Processing },
     /// The trace's alignment in `event` (it must be a member), or its global
@@ -122,6 +124,7 @@ pub enum ApplyError {
     InvalidLabel(String),
     UnknownModel(String),
     UnknownTemplate(Id),
+    InvalidTrace(String),
     InvalidTemplate(String),
 }
 
@@ -153,6 +156,7 @@ impl fmt::Display for ApplyError {
             Self::InvalidLabel(why) => write!(f, "invalid label: {why}"),
             Self::UnknownModel(id) => write!(f, "no model {id}"),
             Self::UnknownTemplate(id) => write!(f, "no template {id}"),
+            Self::InvalidTrace(why) => write!(f, "invalid trace: {why}"),
             Self::InvalidTemplate(why) => write!(f, "invalid template: {why}"),
         }
     }
@@ -293,6 +297,16 @@ impl Project {
                 for event in &mut self.events {
                     event.members.retain(|m| m.trace != *trace);
                 }
+            }
+            Change::ExtendTrace { trace, len, bytes, content_hash } => {
+                let current = self.trace_mut(*trace)?;
+                let TraceSource::Stream { bytes: b, content_hash: h, .. } = &mut current.source else {
+                    return Err(ApplyError::InvalidTrace("only stream-recorded traces grow".to_string()));
+                };
+                if *len < current.len || *bytes < *b {
+                    return Err(ApplyError::InvalidTrace("a recording never shrinks".to_string()));
+                }
+                (*b, *h, current.len) = (*bytes, content_hash.clone(), *len);
             }
             Change::SetProcessing { trace, processing } => {
                 let current = self.trace(*trace).ok_or(ApplyError::UnknownTrace(*trace))?;
@@ -1114,6 +1128,27 @@ mod tests {
             project.commit(&analyst(), change).unwrap();
         }
         assert!(project.templates().is_empty());
+    }
+
+    #[test]
+    fn stream_traces_grow_and_never_shrink() {
+        let (mut project, _) = Project::create("p", &analyst());
+        let file = assigned(&mut project);
+        let grow = |len: usize, bytes: u64| Change::ExtendTrace { trace: file.id, len, bytes, content_hash: "h".into() };
+        assert!(matches!(project.commit(&analyst(), grow(20, 80)), Err(ApplyError::InvalidTrace(_))), "a file trace is fixed");
+        let stream = Trace {
+            id: Id::generate(),
+            len: 0,
+            source: TraceSource::Stream { endpoint: "e".into(), code: "c".into(), path: "p".into(), bytes: 0, content_hash: "0".into() },
+            ..file.clone()
+        };
+        project.commit(&analyst(), Change::AddTrace(stream.clone())).unwrap();
+        let grow = |len: usize, bytes: u64| Change::ExtendTrace { trace: stream.id, len, bytes, content_hash: format!("{bytes}") };
+        project.commit(&analyst(), grow(25, 100)).unwrap();
+        let t = project.trace(stream.id).unwrap();
+        assert_eq!(t.len, 25);
+        assert!(matches!(&t.source, TraceSource::Stream { bytes: 100, content_hash, .. } if content_hash == "100"));
+        assert!(matches!(project.commit(&analyst(), grow(10, 40)), Err(ApplyError::InvalidTrace(_))));
     }
 
     #[test]

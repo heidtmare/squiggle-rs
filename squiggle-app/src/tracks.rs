@@ -73,6 +73,7 @@ impl Plugin for TracksPlugin {
                 Update,
                 (
                     sync_tracks,
+                    grow_tracks,
                     request_series,
                     poll_series,
                     layout_rows,
@@ -263,6 +264,22 @@ impl Series {
         Self { component, processing, samples, values, envelope, full, error }
     }
 
+    /// This unprocessed series extended to all of `raw` (which only grew):
+    /// the level-of-detail pyramid is appended to, never rebuilt.
+    fn extended(&self, raw: &TraceSamples) -> Self {
+        let from = self.values.len();
+        let added: Vec<f32> = match raw {
+            TraceSamples::Real(s) => s.range(from, s.len()).collect(),
+            TraceSamples::Complex(s) => s.range(from, s.len()).map(|iq| self.component.of(iq)).collect(),
+        };
+        let mut values = self.values.clone();
+        let mut envelope = self.envelope.clone();
+        envelope.append(&added);
+        values.append(added);
+        let full = envelope.range(&values, 0, values.len());
+        Self { component: self.component, processing: self.processing, samples: raw.clone(), values, envelope, full, error: self.error.clone() }
+    }
+
     /// Samples covering `from..to` seconds of a trace starting at `start`, as
     /// a contiguous copy and its start time.
     pub fn window(&self, start: f64, rate: f64, from: f64, to: f64) -> (Vec<f32>, f64) {
@@ -315,6 +332,8 @@ pub struct Track {
     pub series: Option<Arc<Series>>,
     /// Top and height in plot-local pixels.
     pub row: Option<(f64, f64)>,
+    /// When a live trace last grew, app seconds.
+    grown_at: f64,
     index: usize,
     cache: Option<MeshCache>,
 }
@@ -539,6 +558,7 @@ fn sync_tracks(
                 component: IqComponent::default(),
                 series: None,
                 row: None,
+                grown_at: 0.0,
                 index: 0,
                 cache: None,
             },
@@ -551,6 +571,29 @@ fn sync_tracks(
     if spawned && !had_tracks {
         *mode = PlotMode::Tracks;
         view.fit_requested = true;
+    }
+}
+
+/// Live traces grow: an unprocessed series is extended in place; a processed
+/// one is rebuilt, at most once a second.
+fn grow_tracks(workspace: Res<Workspace>, time: Res<Time>, mut tracks: Query<(&mut Track, Has<SeriesTask>)>) {
+    let now = time.elapsed_secs_f64();
+    for (mut track, busy) in &mut tracks {
+        let Some(SampleState::Loaded(samples)) = workspace.samples.get(&track.trace) else { continue };
+        if samples.len() <= track.len || busy {
+            continue;
+        }
+        match &track.series {
+            Some(series) if series.processing.is_identity() && series.values.len() == track.len => {
+                let grown = series.extended(samples);
+                track.series = Some(Arc::new(grown));
+            }
+            Some(_) if now - track.grown_at < 1.0 => continue,
+            _ => track.series = None,
+        }
+        track.len = samples.len();
+        track.grown_at = now;
+        track.cache = None;
     }
 }
 
@@ -1383,6 +1426,24 @@ fn trim_number(value: f64) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_growing_series_matches_one_built_whole() {
+        let values: Vec<f32> = (0..5000).map(|i| ((i as f32) * 0.37).sin() * (1.0 + (i % 97) as f32)).collect();
+        let mut raw = TraceSamples::Real(ChunkedSamples::new());
+        raw.append(squiggle_core::SampleBuf::Real(values[..1234].to_vec()));
+        let mut series = Series::build(&raw, IqComponent::default(), Processing::default(), 100.0);
+        for chunk in values[1234..].chunks(333) {
+            raw.append(squiggle_core::SampleBuf::Real(chunk.to_vec()));
+            series = series.extended(&raw);
+        }
+        let whole = Series::build(&raw, IqComponent::default(), Processing::default(), 100.0);
+        assert_eq!(series.values.iter().collect::<Vec<_>>(), whole.values.iter().collect::<Vec<_>>());
+        assert_eq!(series.full, whole.full);
+        for (lo, hi) in [(0, 5000), (17, 4099), (1200, 1300)] {
+            assert_eq!(series.envelope.range(&series.values, lo, hi), whole.envelope.range(&whole.values, lo, hi));
+        }
+    }
+
     fn track(rate: f64, len: usize) -> Track {
         Track {
             trace: Id::generate(),
@@ -1415,6 +1476,7 @@ mod tests {
                 rate,
             ))),
             row: None,
+            grown_at: 0.0,
             index: 0,
             cache: None,
         }
