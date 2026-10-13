@@ -22,18 +22,6 @@ use crate::tracks::{Track, TrackView};
 use crate::workspace::Workspace;
 use crate::theme;
 
-const PALETTE: [egui::Color32; 10] = [
-    egui::Color32::from_rgb(110, 170, 240),
-    egui::Color32::from_rgb(240, 140, 70),
-    egui::Color32::from_rgb(120, 200, 120),
-    egui::Color32::from_rgb(210, 110, 200),
-    egui::Color32::from_rgb(240, 210, 90),
-    egui::Color32::from_rgb(90, 210, 210),
-    egui::Color32::from_rgb(230, 100, 110),
-    egui::Color32::from_rgb(160, 140, 240),
-    egui::Color32::from_rgb(190, 160, 110),
-    egui::Color32::from_rgb(150, 220, 170),
-];
 const NONE_COLOR: egui::Color32 = egui::Color32::from_gray(130);
 
 /// One event's coordinates.
@@ -141,7 +129,7 @@ pub fn scatter_menu(ui: &mut egui::Ui, windows: &mut ScatterWindows) {
 }
 
 fn palette(i: usize) -> egui::Color32 {
-    PALETTE[i % PALETTE.len()]
+    theme::CATEGORIES[i % theme::CATEGORIES.len()]
 }
 
 /// Index of `key` among the distinct keys seen so far.

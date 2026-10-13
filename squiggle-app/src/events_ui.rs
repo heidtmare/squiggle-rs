@@ -31,9 +31,6 @@ use crate::tracks::{Track, TrackView};
 use crate::workspace::Workspace;
 use crate::theme;
 
-const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 190, 60);
-const GOOD_COLOR: egui::Color32 = egui::Color32::from_rgb(90, 210, 110);
-const REJECT_COLOR: egui::Color32 = egui::Color32::from_rgb(235, 80, 80);
 /// Samples per detector call: tracks stream through detectors as a feed would.
 pub const CHUNK: usize = 4096;
 const DETECT_STAGE: &str = "detect";
@@ -733,7 +730,7 @@ fn detect_window(ctx: &egui::Context, windows: &mut EventWindows, workspace: &mu
             ui.separator();
             for (trace, error) in &outcome.errors {
                 let code = project.trace(*trace).and_then(|t| project.sensor(t.sensor)).map_or("?", |s| s.code.as_str());
-                ui.colored_label(WARN_COLOR, format!("{code}: {error}"));
+                ui.colored_label(theme::WARN, format!("{code}: {error}"));
             }
             let located = outcome.candidates.iter().filter(|c| c.fit.is_some()).count();
             let associated: usize = outcome.candidates.iter().map(|c| c.arrivals.len() + c.absorbed.len()).sum();
@@ -792,8 +789,8 @@ fn detect_window(ctx: &egui::Context, windows: &mut EventWindows, workspace: &mu
 fn status_color(status: EventStatus) -> egui::Color32 {
     match status {
         EventStatus::Auto => egui::Color32::from_gray(200),
-        EventStatus::Reviewed => GOOD_COLOR,
-        EventStatus::Rejected => REJECT_COLOR,
+        EventStatus::Reviewed => theme::GOOD,
+        EventStatus::Rejected => theme::BAD,
     }
 }
 
@@ -839,9 +836,8 @@ fn catalogue_window(
         let truth = &workspace.truth_events;
         egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
             egui::Grid::new("catalogue").striped(true).num_columns(if truth.is_empty() { 10 } else { 11 }).show(ui, |ui| {
-                for heading in ["", "Time", "Duration", "Members", "Phenomenologies", "Origin", "Predicted", "Label", "Status", ""] {
-                    ui.strong(heading);
-                }
+                let headings = ["", "Time", "Duration", "Members", "Phenomenologies", "Origin", "Predicted", "Label", "Status", ""];
+                theme::headings(ui, &headings, &["Duration", "Members"]);
                 if !truth.is_empty() {
                     ui.strong("vs truth");
                 }
@@ -864,8 +860,8 @@ fn catalogue_window(
                     if ui.add(egui::Label::new(time.monospace()).sense(egui::Sense::click())).on_hover_text("Review").clicked() {
                         review = Some(event.id);
                     }
-                    ui.monospace(format!("{:.3} s", event.duration()));
-                    ui.label(event.members.len().to_string());
+                    theme::number(ui, format!("{:.3} s", event.duration()));
+                    theme::number(ui, event.members.len().to_string());
                     ui.horizontal(|ui| {
                         let mut seen: Vec<&PhenomenologyId> = Vec::new();
                         for member in &event.members {
@@ -875,8 +871,7 @@ fn catalogue_window(
                             if !seen.contains(&&p.id) {
                                 seen.push(&p.id);
                                 let c = p.color;
-                                let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u8;
-                                ui.colored_label(egui::Color32::from_rgb(byte(c.red), byte(c.green), byte(c.blue)), &p.name);
+                                ui.colored_label(theme::color32(c), &p.name);
                             }
                         }
                     });

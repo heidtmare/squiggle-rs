@@ -28,6 +28,7 @@ use squiggle_core::{
 use crate::plot::line::{self, SquiggleLineMaterial};
 use crate::events_ui;
 use crate::strips;
+use crate::theme;
 use crate::plot::{Plot, PlotMode, TRACK_LABEL_WIDTH};
 use crate::workspace::{SampleState, UNASSIGNED_COLOR, Workspace};
 
@@ -53,7 +54,6 @@ pub const NFFT_CHOICES: [usize; 6] = [64, 128, 256, 512, 1024, 2048];
 const GRID_COLOR: egui::Color32 = egui::Color32::from_gray(45);
 const AXIS_COLOR: egui::Color32 = egui::Color32::from_gray(200);
 const CURSOR_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 215, 0);
-const SELECTED_FILL: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 60, 60, 120);
 const SHIFT_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 140, 60);
 const MANUAL_PICK_COLOR: egui::Color32 = egui::Color32::WHITE;
 const AUTO_PICK_COLOR: egui::Color32 = egui::Color32::from_rgb(100, 180, 255);
@@ -773,11 +773,6 @@ fn draw_tracks(
     }
 }
 
-fn color32(color: Rgba) -> egui::Color32 {
-    let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
-    egui::Color32::from_rgb(byte(color.red), byte(color.green), byte(color.blue))
-}
-
 fn manual(workspace: &Workspace) -> Provenance {
     Provenance::Manual { analyst: workspace.analyst.clone(), at: Timestamp::now() }
 }
@@ -1025,17 +1020,20 @@ pub fn tracks_ui(
 
         let clip = painter.with_clip_rect(label.intersect(area.with_min_x(full.min.x)));
         if track.selected {
-            clip.rect_filled(label, 0.0, SELECTED_FILL);
+            clip.rect_filled(label, 0.0, theme::ACCENT.gamma_multiply(0.25));
+            clip.rect_stroke(label.shrink(0.5), 0.0, egui::Stroke::new(1.0, theme::ACCENT_BRIGHT), egui::StrokeKind::Inside);
+        } else if label_response.hovered() {
+            clip.rect_filled(label, 0.0, egui::Color32::from_white_alpha(8));
         }
-        clip.rect_filled(egui::Rect::from_x_y_ranges(label.min.x + 2.0..=label.min.x + 6.0, y.shrink(3.0)), 1.0, color32(track.color));
+        clip.rect_filled(egui::Rect::from_x_y_ranges(label.min.x + 2.0..=label.min.x + 6.0, y.shrink(3.0)), 1.0, theme::color32(track.color));
         let x = label.min.x + 12.0;
         let mut line_y = y.min + 4.0;
         let title = if view.reference == Some(track.trace) { format!("★ {}", track.code) } else { track.code.clone() };
         clip.text(egui::pos2(x, line_y), egui::Align2::LEFT_TOP, title, egui::FontId::proportional(12.0), egui::Color32::WHITE);
         line_y += 15.0;
         let (phenomenology, color) = match &track.phenomenology {
-            Some(name) => (name.as_str(), color32(track.color)),
-            None => ("unassigned", color32(UNASSIGNED_COLOR)),
+            Some(name) => (name.as_str(), theme::color32(track.color)),
+            None => ("unassigned", theme::color32(UNASSIGNED_COLOR)),
         };
         let mut detail = format!("{phenomenology} · {} Hz", trim_number(track.rate));
         if track.kind == SampleKind::Complex {
@@ -1073,7 +1071,7 @@ pub fn tracks_ui(
                 state.push(format!("⚠ {error}"));
             }
             if !state.is_empty() {
-                let color = if track.preview != 0.0 { SHIFT_COLOR } else { egui::Color32::from_gray(160) };
+                let color = if track.preview != 0.0 { SHIFT_COLOR } else { theme::MUTED };
                 clip.text(egui::pos2(x, line_y), egui::Align2::LEFT_TOP, state.join(" · "), small.clone(), color);
             }
         }

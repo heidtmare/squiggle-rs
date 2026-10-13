@@ -40,9 +40,6 @@ const SHOWCASE_WIDTH: f32 = 340.0;
 const UNDO: egui::KeyboardShortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Z);
 const REDO: egui::KeyboardShortcut =
     egui::KeyboardShortcut::new(egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT), egui::Key::Z);
-const PASS_COLOR: egui::Color32 = egui::Color32::from_rgb(90, 210, 110);
-const FAIL_COLOR: egui::Color32 = egui::Color32::from_rgb(235, 80, 80);
-const UNSAVED_COLOR: egui::Color32 = egui::Color32::from_rgb(230, 180, 80);
 
 pub struct UiPlugin;
 
@@ -211,13 +208,12 @@ fn chrome(
     mut commands: PlotCommands,
     mut project: ProjectAccess,
     mut tracks: TrackAccess,
-    mut fonts_installed: Local<bool>,
+    mut themed: Local<bool>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?.clone();
-    ctx.set_visuals(egui::Visuals::dark());
-    if !*fonts_installed {
-        theme::install_fonts(&ctx);
-        *fonts_installed = true;
+    if !*themed {
+        theme::install(&ctx);
+        *themed = true;
     }
 
     // Undo and redo, unless a text field has the keyboard.
@@ -728,9 +724,9 @@ fn toolbar(
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if unsaved {
-                ui.label(egui::RichText::new(&plot.name).color(UNSAVED_COLOR))
+                ui.label(egui::RichText::new(&plot.name).color(theme::WARN))
                     .on_hover_text("Never saved; File ▸ Save Project As… keeps it");
-                ui.label(egui::RichText::new("●").color(UNSAVED_COLOR));
+                ui.label(egui::RichText::new("●").color(theme::WARN));
             } else {
                 ui.label(egui::RichText::new(&plot.name).weak());
             }
@@ -809,16 +805,16 @@ fn showcase_panel(ui: &mut egui::Ui, showcase: &mut Showcase, commands: &mut Plo
         ui.separator();
         let passed = loaded.checks.iter().filter(|check| check.passed).count();
         let (summary, color) = if loaded.all_passed() {
-            (format!("All {passed} checks pass"), PASS_COLOR)
+            (format!("All {passed} checks pass"), theme::GOOD)
         } else {
-            (format!("{passed} of {} checks pass", loaded.checks.len()), FAIL_COLOR)
+            (format!("{passed} of {} checks pass", loaded.checks.len()), theme::BAD)
         };
         ui.label(egui::RichText::new(summary).strong().color(color));
         ui.add_space(4.0);
 
         for check in &loaded.checks {
             ui.horizontal_top(|ui| {
-                let (mark, color) = if check.passed { ("✔", PASS_COLOR) } else { ("✘", FAIL_COLOR) };
+                let (mark, color) = if check.passed { ("✔", theme::GOOD) } else { ("✘", theme::BAD) };
                 ui.label(egui::RichText::new(mark).color(color).strong());
                 ui.vertical(|ui| {
                     ui.label(&check.claim);
@@ -893,12 +889,7 @@ fn hand_viewport_to_plot(
 
 fn swatch(ui: &mut egui::Ui, color: Rgba) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-    let to_byte = |channel: f32| (channel.clamp(0.0, 1.0) * 255.0).round() as u8;
-    ui.painter().rect_filled(
-        rect,
-        egui::CornerRadius::same(2),
-        egui::Color32::from_rgb(to_byte(color.red), to_byte(color.green), to_byte(color.blue)),
-    );
+    ui.painter().rect_filled(rect, egui::CornerRadius::same(2), theme::color32(color));
 }
 
 /// A toggle whose label reads up a narrow strip, standing in for the rotated

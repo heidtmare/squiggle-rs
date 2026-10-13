@@ -22,7 +22,6 @@ use crate::demo::DemoOptions;
 use crate::workspace::{Workspace, WorkspaceRequest};
 use crate::theme;
 
-const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 190, 60);
 /// Seconds between automatic syncs.
 const AUTO_S: f64 = 5.0;
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -337,7 +336,7 @@ fn summary(change: &Change, project: &Project) -> String {
 
 fn conflict_ui(ui: &mut egui::Ui, conflict: &Conflict, project: &Project) -> Option<bool> {
     let mut choice = None;
-    ui.colored_label(WARN_COLOR, &conflict.reason);
+    ui.colored_label(theme::WARN, &conflict.reason);
     ui.label(format!("Mine ({}, {}): {}", conflict.mine.analyst, conflict.mine.at, summary(&conflict.mine.change, project)));
     for op in &conflict.theirs {
         ui.label(format!("Theirs ({}, {}): {}", op.analyst, op.at, summary(&op.change, project)));

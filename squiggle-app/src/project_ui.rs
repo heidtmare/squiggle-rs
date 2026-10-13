@@ -14,8 +14,6 @@ use squiggle_core::{
 use crate::workspace::{ImportQueue, SampleState, UNASSIGNED_COLOR, Workspace, WorkspaceRequest};
 use crate::theme;
 
-const PROBLEM_COLOR: egui::Color32 = egui::Color32::from_rgb(235, 80, 80);
-const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 190, 60);
 
 #[derive(Resource, Default)]
 pub struct ProjectWindows {
@@ -89,15 +87,10 @@ pub fn windows(
     Ok(())
 }
 
-fn color32(color: Rgba) -> egui::Color32 {
-    let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
-    egui::Color32::from_rgb(byte(color.red), byte(color.green), byte(color.blue))
-}
-
 fn phenomenology_label(project: &Project, id: Option<&PhenomenologyId>) -> egui::RichText {
     match id.and_then(|id| project.phenomenology(id)) {
-        Some(p) => egui::RichText::new(&p.name).color(color32(p.color)),
-        None => egui::RichText::new("⚠ unassigned").color(WARN_COLOR),
+        Some(p) => egui::RichText::new(&p.name).color(theme::color32(p.color)),
+        None => egui::RichText::new("⚠ unassigned").color(theme::WARN),
     }
 }
 
@@ -115,7 +108,7 @@ fn phenomenology_choice(
             ui.selectable_value(value, None, "unassigned");
         }
         for p in project.phenomenologies() {
-            ui.selectable_value(value, Some(p.id.clone()), egui::RichText::new(&p.name).color(color32(p.color)));
+            ui.selectable_value(value, Some(p.id.clone()), egui::RichText::new(&p.name).color(theme::color32(p.color)));
         }
     });
     *value != before
@@ -193,7 +186,7 @@ fn import_window(
         .show(ctx, |ui| {
             let project = &workspace.project;
             for failure in &queue.failures {
-                ui.label(egui::RichText::new(format!("✘ {failure}")).color(PROBLEM_COLOR));
+                ui.label(egui::RichText::new(format!("✘ {failure}")).color(theme::BAD));
             }
             raw_section(ui, queue, requests);
             if queue.rows.is_empty() {
@@ -238,7 +231,7 @@ fn import_window(
                             ui.add_sized([240.0, height], egui::TextEdit::singleline(&mut row.start))
                                 .on_hover_text(format!("From: {}", row.start_origin));
                             if row.start_origin != "file" && row.start_origin != "entered" {
-                                ui.label(egui::RichText::new("⚠").color(WARN_COLOR))
+                                ui.label(egui::RichText::new("⚠").color(theme::WARN))
                                     .on_hover_text(format!("Not in the file ({}); check before importing", row.start_origin));
                             }
                         });
@@ -268,7 +261,7 @@ fn import_window(
                         }
 
                         match &row.problem {
-                            Some(problem) => ui.label(egui::RichText::new(problem).color(PROBLEM_COLOR)),
+                            Some(problem) => ui.label(egui::RichText::new(problem).color(theme::BAD)),
                             None => ui.label(""),
                         };
                         ui.end_row();
@@ -351,7 +344,7 @@ fn sensors_window(ctx: &egui::Context, workspace: &mut Workspace, windows: &mut 
                     }
                     match (&parsed, sensor.location) {
                         (Err(why), _) if draft.iter().any(|t| !t.trim().is_empty()) => {
-                            ui.colored_label(WARN_COLOR, why);
+                            ui.colored_label(theme::WARN, why);
                         }
                         (_, None) => {
                             ui.weak("none: not used to locate");
@@ -366,8 +359,8 @@ fn sensors_window(ctx: &egui::Context, workspace: &mut Workspace, windows: &mut 
                         let (status, color) = match workspace.samples.get(&trace.id) {
                             Some(SampleState::Loaded(_)) => ("loaded".to_string(), None),
                             Some(SampleState::Loading) => ("loading…".to_string(), None),
-                            Some(SampleState::Failed(error)) => (format!("✘ {error}"), Some(PROBLEM_COLOR)),
-                            None => ("not loaded".to_string(), Some(WARN_COLOR)),
+                            Some(SampleState::Failed(error)) => (format!("✘ {error}"), Some(theme::BAD)),
+                            None => ("not loaded".to_string(), Some(theme::WARN)),
                         };
                         ui.label(format!(
                             "{} · {} Hz · {:.3} s · {}",
@@ -412,7 +405,7 @@ fn phenomenologies_window(ctx: &egui::Context, workspace: &Workspace, windows: &
             }
             ui.end_row();
             for p in workspace.project.phenomenologies() {
-                ui.label(egui::RichText::new(&p.name).color(color32(p.color)));
+                ui.label(egui::RichText::new(&p.name).color(theme::color32(p.color)));
                 ui.label(egui::RichText::new(p.id.as_str()).monospace());
                 ui.label(format!("{} ({})", p.quantity, p.units));
                 ui.label(p.sample_kind.label());
@@ -614,7 +607,7 @@ fn editor_window(ctx: &egui::Context, workspace: &mut Workspace, windows: &mut P
         }
 
         if let Some(problem) = &draft.problem {
-            ui.label(egui::RichText::new(problem).color(PROBLEM_COLOR));
+            ui.label(egui::RichText::new(problem).color(theme::BAD));
         }
         ui.separator();
         if let Some(version) = draft.replaces {

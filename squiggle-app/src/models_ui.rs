@@ -18,8 +18,6 @@ use squiggle_models::Package;
 use crate::workspace::Workspace;
 use crate::theme;
 
-const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 190, 60);
-const FAIL_COLOR: egui::Color32 = egui::Color32::from_rgb(235, 80, 80);
 
 /// A referenced package as read from disk.
 struct Loaded {
@@ -290,10 +288,10 @@ pub fn windows(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut
                     ui.monospace(model.id.trim_start_matches("heidtmare.squiggle.model/")).on_hover_text(format!("{}\n{}", model.id, model.path));
                     match &fit {
                         Err(error) => {
-                            ui.colored_label(FAIL_COLOR, "✖").on_hover_text(error);
+                            ui.colored_label(theme::BAD, "✖").on_hover_text(error);
                         }
                         Ok(Some(warning)) => {
-                            ui.colored_label(WARN_COLOR, "⚠").on_hover_text(warning);
+                            ui.colored_label(theme::WARN, "⚠").on_hover_text(warning);
                         }
                         Ok(None) => {}
                     }
@@ -391,7 +389,7 @@ pub fn windows(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut
             }
         });
         if let Some(error) = &windows.error {
-            ui.colored_label(FAIL_COLOR, error);
+            ui.colored_label(theme::BAD, error);
         }
     });
     if let Some((label, c)) = change {

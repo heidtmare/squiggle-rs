@@ -24,8 +24,6 @@ use crate::tracks::{Track, TrackView};
 use crate::workspace::Workspace;
 use crate::theme;
 
-const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 190, 60);
-const GOOD_COLOR: egui::Color32 = egui::Color32::from_rgb(90, 210, 110);
 const PICK_STAGE: &str = "pick.sta-lta-aic";
 const LOCATE_STAGE: &str = "locate.grid";
 const MAP_SIZE: f32 = 320.0;
@@ -387,7 +385,7 @@ fn pick_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &mut
             ui.weak("Within the event under review: its members and window only.");
         }
         if view.show_raw {
-            ui.colored_label(WARN_COLOR, "⚠ Raw display is on: picks use unprocessed samples.");
+            ui.colored_label(theme::WARN, "⚠ Raw display is on: picks use unprocessed samples.");
         }
         let project = &workspace.project;
         // Settings per phenomenology present.
@@ -442,9 +440,7 @@ fn pick_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &mut
         if let Some((rows, hash, event)) = &mut windows.pick_rows {
             ui.separator();
             egui::Grid::new("pick_results").striped(true).num_columns(6).show(ui, |ui| {
-                for heading in ["", "Trace", "Phase", "Onset", "STA/LTA", "σ"] {
-                    ui.strong(heading);
-                }
+                theme::headings(ui, &["", "Trace", "Phase", "Onset", "STA/LTA", "σ"], &["Onset", "STA/LTA", "σ"]);
                 ui.end_row();
                 for row in rows.iter_mut() {
                     let manual = row.existing.is_some_and(|e| e.1);
@@ -454,17 +450,17 @@ fn pick_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &mut
                     ui.label(if row.phase.is_empty() { "onset" } else { &row.phase });
                     match &row.result {
                         Ok(Some(p)) => {
-                            ui.monospace(relative(project, p.time));
-                            ui.monospace(format!("{:.1}", p.ratio));
-                            ui.monospace(format!("{:.2e} s", p.uncertainty_s));
+                            theme::number(ui, relative(project, p.time));
+                            theme::number(ui, format!("{:.1}", p.ratio));
+                            theme::number(ui, format!("{:.2e} s", p.uncertainty_s));
                         }
                         Ok(None) => {
-                            ui.colored_label(WARN_COLOR, "no trigger");
+                            ui.colored_label(theme::WARN, "no trigger");
                             ui.label("");
                             ui.label("");
                         }
                         Err(error) => {
-                            ui.colored_label(WARN_COLOR, error);
+                            ui.colored_label(theme::WARN, error);
                             ui.label("");
                             ui.label("");
                         }
@@ -472,7 +468,7 @@ fn pick_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &mut
                     ui.end_row();
                     if manual {
                         ui.label("");
-                        ui.colored_label(WARN_COLOR, "🔒 manual pick kept");
+                        ui.colored_label(theme::WARN, "🔒 manual pick kept");
                         ui.end_row();
                     }
                 }
@@ -529,9 +525,7 @@ fn locate_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &m
         let mut usable = Vec::new();
         egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
             egui::Grid::new("locate_picks").striped(true).num_columns(6).show(ui, |ui| {
-                for heading in ["", "Sensor", "Phase", "Arrival", "σ", "Residual"] {
-                    ui.strong(heading);
-                }
+                theme::headings(ui, &["", "Sensor", "Phase", "Arrival", "σ", "Residual"], &["Arrival", "σ", "Residual"]);
                 ui.end_row();
                 let mut picks = scoped.clone();
                 picks.sort_by(|a, b| {
@@ -552,11 +546,11 @@ fn locate_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &m
                     ui.monospace(code);
                     let manual = if pick.provenance.is_manual() { " ✋" } else { "" };
                     ui.label(format!("{}{manual}", pick.phase_label()));
-                    ui.monospace(project.pick_time(pick).map_or("?".into(), |t| relative(project, t)));
-                    ui.monospace(format!("{:.2e} s", pick.uncertainty_s));
+                    theme::number(ui, project.pick_time(pick).map_or("?".into(), |t| relative(project, t)));
+                    theme::number(ui, format!("{:.2e} s", pick.uncertainty_s));
                     match (&observation, fit_residual(pick.id)) {
-                        (Err(why), _) => ui.colored_label(WARN_COLOR, *why),
-                        (Ok(_), Some(r)) => ui.monospace(format!("{r:+.2e} s")),
+                        (Err(why), _) => ui.colored_label(theme::WARN, *why),
+                        (Ok(_), Some(r)) => theme::number(ui, format!("{r:+.2e} s")),
                         (Ok(_), None) => ui.label(""),
                     };
                     ui.end_row();
@@ -590,7 +584,7 @@ fn locate_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &m
                 ui.spinner();
                 ui.label("searching…");
             } else if usable.len() < 4 {
-                ui.colored_label(WARN_COLOR, format!("{} usable pick(s); four or more constrain position, depth and time", usable.len()));
+                ui.colored_label(theme::WARN, format!("{} usable pick(s); four or more constrain position, depth and time", usable.len()));
             }
         });
 
@@ -618,7 +612,7 @@ fn locate_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &m
                         ui.end_row();
                         ui.label("χ²/dof");
                         let reduced = fit.chi2 / fit.dof as f64;
-                        let color = if reduced <= 4.0 { GOOD_COLOR } else { WARN_COLOR };
+                        let color = if reduced <= 4.0 { theme::GOOD } else { theme::WARN };
                         ui.colored_label(color, format!("{reduced:.2}")).on_hover_text("Near 1 when residuals match the pick uncertainties");
                         ui.end_row();
                         if let Some((source, time)) = workspace.truth_origin {
@@ -664,7 +658,7 @@ fn locate_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &m
                         changes = Some((format!("Remove moveout from {n} traces"), moveout));
                     }
                     if locked > 0 {
-                        ui.colored_label(WARN_COLOR, format!("🔒 {locked} locked kept"));
+                        ui.colored_label(theme::WARN, format!("🔒 {locked} locked kept"));
                     }
                     if ui.button("Clear origin").clicked() {
                         changes = Some(("Clear origin".to_string(), vec![Change::SetOrigin { origin: None, event }]));
@@ -690,7 +684,7 @@ fn locate_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &m
             if reference.is_none() {
                 ui.weak("Needs a ★ reference track with a pick.");
             } else if locked > 0 {
-                ui.colored_label(WARN_COLOR, format!("🔒 {locked} locked kept"));
+                ui.colored_label(theme::WARN, format!("🔒 {locked} locked kept"));
             }
         });
     });
@@ -698,11 +692,6 @@ fn locate_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &m
         workspace.execute_or_report(label, changes);
     }
     windows.locate_open = open;
-}
-
-fn color32(color: squiggle_core::Rgba) -> egui::Color32 {
-    let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
-    egui::Color32::from_rgb(byte(color.red), byte(color.green), byte(color.blue))
 }
 
 /// The first grid's misfit, sensors, solution and truth on a local plane.
@@ -744,7 +733,7 @@ fn map(ui: &mut egui::Ui, project: &Project, view: &FitView, truth: Option<squig
             .assignment
             .as_ref()
             .and_then(|a| project.phenomenology(&a.phenomenology))
-            .map_or(egui::Color32::GRAY, |p| color32(p.color));
+            .map_or(egui::Color32::GRAY, |p| theme::color32(p.color));
         let at = to_screen(latitude, longitude);
         let size = 6.0;
         let triangle = vec![at + egui::vec2(0.0, -size), at + egui::vec2(size * 0.87, size * 0.5), at + egui::vec2(-size * 0.87, size * 0.5)];

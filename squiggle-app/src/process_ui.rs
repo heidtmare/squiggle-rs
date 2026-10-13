@@ -18,8 +18,6 @@ use crate::tracks::{Track, TrackView};
 use crate::workspace::Workspace;
 use crate::theme;
 
-const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 190, 60);
-const GOOD_COLOR: egui::Color32 = egui::Color32::from_rgb(90, 210, 110);
 /// Analysis samples per measured pair, window plus search range.
 const ALIGN_SAMPLES: usize = 1 << 20;
 /// Rows whose reference pair is weaker than this (coefficient × confidence),
@@ -268,14 +266,14 @@ fn processing_window(ctx: &egui::Context, windows: &mut ProcessWindows, workspac
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(&track.code).monospace());
                     if track.phenomenology.is_none() {
-                        ui.colored_label(WARN_COLOR, "⚠ unassigned; not processed");
+                        ui.colored_label(theme::WARN, "⚠ unassigned; not processed");
                         return;
                     }
                     ui.weak(track.processing.describe());
                     match processing.validate(track.rate) {
                         Ok(()) => changes.push(Change::SetProcessing { trace: track.trace, processing }),
                         Err(error) => {
-                            ui.colored_label(WARN_COLOR, format!("⚠ {error}"));
+                            ui.colored_label(theme::WARN, format!("⚠ {error}"));
                         }
                     }
                     clears.push(Change::SetProcessing { trace: track.trace, processing: Processing::default() });
@@ -479,22 +477,22 @@ fn align_window(
         let mut runnable = reference.is_some() && a.to > a.from;
         if let Some(reference) = reference {
             if reference.phenomenology_id.is_none() {
-                ui.colored_label(WARN_COLOR, "⚠ The reference has no phenomenology assigned.");
+                ui.colored_label(theme::WARN, "⚠ The reference has no phenomenology assigned.");
                 runnable = false;
             }
             let mut members = 0;
             for track in chosen.iter().filter(|t| t.trace != reference.trace) {
                 if !track.member {
-                    ui.colored_label(WARN_COLOR, format!("{}: not in the event, skipped", track.code));
+                    ui.colored_label(theme::WARN, format!("{}: not in the event, skipped", track.code));
                 } else if track.phenomenology_id.is_none() {
-                    ui.colored_label(WARN_COLOR, format!("{}: unassigned, skipped", track.code));
+                    ui.colored_label(theme::WARN, format!("{}: unassigned, skipped", track.code));
                 } else if track.phenomenology_id != reference.phenomenology_id {
                     ui.colored_label(
-                        WARN_COLOR,
+                        theme::WARN,
                         format!("{}: different phenomenology, skipped (cross-phenomenology alignment uses picks)", track.code),
                     );
                 } else if track.series.is_none() {
-                    ui.colored_label(WARN_COLOR, format!("{}: still loading", track.code));
+                    ui.colored_label(theme::WARN, format!("{}: still loading", track.code));
                 } else {
                     members += 1;
                 }
@@ -526,56 +524,55 @@ fn align_window(
             }
             if results.rows.iter().any(|r| !r.is_reference && r.delay.is_some() && r.support < MIN_WEIGHT) {
                 ui.colored_label(
-                    WARN_COLOR,
+                    theme::WARN,
                     "⚠ Weak or ambiguous correlation left unchecked. Filter to the signal band or narrow the window, then measure again.",
                 );
             }
             let has_truth = results.rows.iter().any(|r| r.truth_error.is_some());
             egui::Grid::new("align_results").striped(true).num_columns(if has_truth { 8 } else { 7 }).show(ui, |ui| {
-                for heading in ["", "Trace", "Delay", "r", "Confidence", "Residual"] {
-                    ui.strong(heading);
-                }
+                let numeric = ["Delay", "r", "Confidence", "Residual", "vs truth", "New offset"];
+                theme::headings(ui, &["", "Trace", "Delay", "r", "Confidence", "Residual"], &numeric);
                 if has_truth {
-                    ui.strong("vs truth");
+                    theme::headings(ui, &["vs truth"], &numeric);
                 }
-                ui.strong("New offset");
+                theme::headings(ui, &["New offset"], &numeric);
                 ui.end_row();
                 for row in &mut results.rows {
                     let enabled = !row.is_reference && !row.locked && row.delay.is_some();
                     ui.add_enabled(enabled, egui::Checkbox::without_text(&mut row.apply));
                     ui.label(egui::RichText::new(if row.is_reference { format!("★ {}", row.code) } else { row.code.clone() }).monospace());
                     match row.delay {
-                        Some(delay) if !row.is_reference => ui.monospace(seconds(delay)),
+                        Some(delay) if !row.is_reference => theme::number(ui, seconds(delay)),
                         Some(_) => ui.weak("reference"),
-                        None => ui.colored_label(WARN_COLOR, "not measured"),
+                        None => ui.colored_label(theme::WARN, "not measured"),
                     };
                     match row.direct {
-                        Some(m) => ui.monospace(format!("{:.2}", m.estimate.coefficient)),
+                        Some(m) => theme::number(ui, format!("{:.2}", m.estimate.coefficient)),
                         None => ui.label(""),
                     };
                     match row.direct {
                         Some(m) => {
-                            let color = if m.estimate.confidence >= 0.3 { GOOD_COLOR } else { WARN_COLOR };
-                            ui.colored_label(color, format!("{:.2}", m.estimate.confidence))
+                            let color = if m.estimate.confidence >= 0.3 { theme::GOOD } else { theme::WARN };
+                            theme::number_colored(ui, format!("{:.2}", m.estimate.confidence), color)
                         }
                         None => ui.label(""),
                     };
                     match row.worst_residual {
-                        Some(r) => ui.monospace(format!("{:.2e} s", r)),
+                        Some(r) => theme::number(ui, format!("{:.2e} s", r)),
                         None => ui.label(""),
                     };
                     if has_truth {
                         match row.truth_error {
-                            Some(e) if !row.is_reference => ui.monospace(seconds(e)),
+                            Some(e) if !row.is_reference => theme::number(ui, seconds(e)),
                             _ => ui.label(""),
                         };
                     }
                     match (row.delay, row.is_reference, row.locked) {
                         (Some(delay), false, true) => ui.colored_label(
-                            WARN_COLOR,
+                            theme::WARN,
                             format!("🔒 kept {}; measured {}", seconds(row.offset), seconds(row.offset - delay)),
                         ),
-                        (Some(delay), false, false) => ui.monospace(seconds(row.offset - delay)),
+                        (Some(delay), false, false) => theme::number(ui, seconds(row.offset - delay)),
                         _ => ui.label(""),
                     };
                     ui.end_row();

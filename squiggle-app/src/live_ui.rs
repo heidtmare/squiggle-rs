@@ -29,7 +29,6 @@ use crate::tracks::{Track, TrackView};
 use crate::workspace::{SampleState, Workspace, WorkspaceRequest};
 use crate::theme;
 
-const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 190, 60);
 /// Most feed messages handled per frame.
 const PER_FRAME: usize = 20_000;
 const CHECKPOINT_S: f64 = 10.0;
@@ -487,7 +486,7 @@ pub fn window(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut 
             let waiting: Vec<&(Id, PhenomenologyId)> =
                 session.suggestions.iter().filter(|(s, _)| workspace.project.sensor(*s).is_some_and(|s| s.assignment.is_none())).collect();
             if !waiting.is_empty() {
-                ui.colored_label(WARN_COLOR, format!("{} new sensors have no phenomenology; they are recorded but not processed.", waiting.len()));
+                ui.colored_label(theme::WARN, format!("{} new sensors have no phenomenology; they are recorded but not processed.", waiting.len()));
                 let names: Vec<String> = waiting
                     .iter()
                     .map(|(s, p)| format!("{} → {p}", workspace.project.sensor(*s).map_or("?", |s| s.code.as_str())))
