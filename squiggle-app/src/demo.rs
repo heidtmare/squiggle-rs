@@ -45,6 +45,10 @@ pub struct DemoOptions {
     pub analyst: Option<String>,
     /// Sync server (`host:port`) the Shared Project window starts with.
     pub server: Option<String>,
+    /// Tour script to drive the app with (see `tour`).
+    pub tour: Option<std::path::PathBuf>,
+    /// Record the tour to this video file.
+    pub record: Option<std::path::PathBuf>,
 }
 
 impl Default for DemoOptions {
@@ -61,6 +65,8 @@ impl Default for DemoOptions {
             live_demo: false,
             analyst: None,
             server: None,
+            tour: None,
+            record: None,
         }
     }
 }
@@ -69,7 +75,8 @@ pub const USAGE: &str = "\
 Usage: squiggle-app [--project FILE | --synthetic | --located | --swarm | --mixed | --catalogue | --families]
                     [--live HOST:PORT | --live-demo] [--analyst NAME] [--server HOST:PORT]
                     [--squiggles N] [--samples N]
-                    [--demo SCENE] [--screenshot FILE] [WAVEFORM...]
+                    [--demo SCENE] [--screenshot FILE] [--tour SCRIPT [--record OUT.mp4]]
+                    [WAVEFORM...]
 
   WAVEFORM...        import these files at startup (miniSEED, SAC, SigMF,
                      WAV, CSV; anything else as raw binary)
@@ -94,6 +101,8 @@ Usage: squiggle-app [--project FILE | --synthetic | --located | --swarm | --mixe
   --samples N        samples per generated squiggle (default 1000)
   --demo SCENE       open a transform demo: fourier or wavelet
   --screenshot FILE  save a PNG of the window once the plot settles, then quit
+  --tour SCRIPT      drive the app with a scripted tour, then quit
+  --record OUT.mp4   record the tour to a video (needs ffmpeg)
 ";
 
 impl DemoOptions {
@@ -126,6 +135,14 @@ impl DemoOptions {
                 "--screenshot" => {
                     let path = args.next().ok_or_else(|| format!("{argument} needs a file"))?;
                     options.screenshot = Some(path.into());
+                }
+                "--tour" => {
+                    let path = args.next().ok_or_else(|| format!("{argument} needs a file"))?;
+                    options.tour = Some(path.into());
+                }
+                "--record" => {
+                    let path = args.next().ok_or_else(|| format!("{argument} needs a file"))?;
+                    options.record = Some(path.into());
                 }
                 "--project" => {
                     let path = args.next().ok_or_else(|| format!("{argument} needs a file"))?;

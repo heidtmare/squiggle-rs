@@ -917,6 +917,9 @@ fn export_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace: 
             if ui.add_enabled(n > 0 && !busy, egui::Button::new(format!("Export {n} events…"))).clicked() {
                 windows.exported = None;
                 windows.folder = Some(IoTaskPool::get().spawn(async {
+                    if let Some(path) = crate::tour::picked() {
+                        return Some(path);
+                    }
                     let folder = rfd::AsyncFileDialog::new().set_title("Export dataset to folder").pick_folder().await?;
                     Some(folder.path().to_path_buf())
                 }));

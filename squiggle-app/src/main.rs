@@ -20,6 +20,7 @@ mod project_ui;
 mod showcase;
 mod strips;
 mod synthetic;
+mod tour;
 mod tracks;
 mod ui;
 mod workspace;
@@ -37,18 +38,35 @@ fn main() -> AppExit {
         }
     };
 
-    App::new()
-        // The Java plot painted onto a black canvas.
-        .insert_resource(ClearColor(Color::BLACK))
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+    // Tours run headless: the window is never opened, only rendered offscreen
+    // at its size, laid out at 720p and drawn at 1080p.
+    let tour = options.tour.is_some();
+    let resolution = if tour {
+        WindowResolution::new(1920, 1080).with_scale_factor_override(1.5)
+    } else {
+        WindowResolution::new(1152, 648)
+    };
+    let mut plugins = DefaultPlugins
+        .set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Squiggle".to_string(),
                 name: Some(squiggle_io::APP_ID.to_string()),
-                resolution: WindowResolution::new(1152, 648),
+                resolution,
                 ..default()
             }),
             ..default()
-        }))
+        })
+        .build();
+    if tour {
+        plugins = plugins
+            .disable::<bevy::winit::WinitPlugin>()
+            .add(bevy::app::ScheduleRunnerPlugin::run_loop(std::time::Duration::ZERO));
+    }
+
+    App::new()
+        // The Java plot painted onto a black canvas.
+        .insert_resource(ClearColor(Color::BLACK))
+        .add_plugins(plugins)
         .add_plugins(EguiPlugin::default())
         .add_plugins(plot::PlotPlugin)
         .add_plugins(ui::UiPlugin)
@@ -56,6 +74,7 @@ fn main() -> AppExit {
         .add_plugins(tracks::TracksPlugin)
         .add_plugins(showcase::ShowcasePlugin)
         .insert_resource(options)
+        .add_plugins(tour::TourPlugin)
         .add_systems(Startup, demo::seed)
         .add_systems(Update, demo::screenshot)
         .run()
