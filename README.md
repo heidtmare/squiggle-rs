@@ -6,7 +6,30 @@ them through Fourier and wavelet transforms without leaving the plot.
 
 [![Squiggle showcase: click for the full video](docs/media/showcase.gif)](docs/media/showcase.mp4)
 
-*Highlights; click for the [full tour](docs/media/showcase.mp4) (4:44).*
+*Highlights; click for the [full tour](docs/media/showcase.mp4) (4:51).*
+
+## Contents
+
+- [Features](#features)
+- [Running](#running)
+- [Using it](#using-it)
+- [Projects](#projects)
+- [Processing and alignment](#processing-and-alignment)
+  - [Alignment](#alignment)
+- [Picking and location](#picking-and-location)
+- [Events](#events)
+- [Classification](#classification)
+- [Models](#models)
+- [Templates and clusters](#templates-and-clusters)
+- [Live feeds](#live-feeds)
+- [Shared projects](#shared-projects)
+- [Transforms](#transforms)
+  - [Demos](#demos)
+- [How it works](#how-it-works)
+  - [Layout](#layout)
+  - [Rendering](#rendering)
+  - [Picking](#picking)
+- [Testing](#testing)
 
 ## Features
 
