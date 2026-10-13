@@ -20,6 +20,7 @@ use squiggle_models::package::{Package, SPEC_FILE};
 
 use crate::demo::DemoOptions;
 use crate::workspace::{Workspace, WorkspaceRequest};
+use crate::theme;
 
 const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 190, 60);
 /// Seconds between automatic syncs.
@@ -361,7 +362,7 @@ pub fn window(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut 
     let mut open = true;
     let mut settled: Option<(usize, bool)> = None;
     let mut unlink = false;
-    egui::Window::new("Shared Project").open(&mut open).default_width(480.0).show(&ctx, |ui| {
+    theme::tool_window(&ctx, "Shared Project").open(&mut open).default_width(480.0).show(&ctx, |ui| {
         let busy = state.job.is_some() || state.dialog.is_some();
         ui.label(format!("Analyst: {}", workspace.analyst)).on_hover_text("Set with --analyst NAME or $SQUIGGLE_ANALYST");
         match workspace.remote().cloned() {
@@ -386,7 +387,7 @@ pub fn window(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut 
                 });
                 ui.horizontal(|ui| {
                     let saved = workspace.cache_dir().is_some();
-                    let button = ui.add_enabled(!busy && saved, egui::Button::new("Share this project"));
+                    let button = ui.add_enabled(!busy && saved, theme::primary("Share this project"));
                     let button = if saved { button } else { button.on_disabled_hover_text("Save the project first") };
                     if button.clicked() {
                         let (endpoint, analyst) = (state.endpoint.clone(), workspace.analyst.clone());

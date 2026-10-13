@@ -16,6 +16,7 @@ use squiggle_core::{Change, EventStatus, LabelId, Project};
 use squiggle_models::Package;
 
 use crate::workspace::Workspace;
+use crate::theme;
 
 const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 190, 60);
 const FAIL_COLOR: egui::Color32 = egui::Color32::from_rgb(235, 80, 80);
@@ -265,7 +266,7 @@ pub fn windows(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut
     let mut open = true;
     let mut change: Option<(&str, Change)> = None;
     let weights = &mut windows.weights;
-    egui::Window::new("Models").open(&mut open).default_width(640.0).show(&ctx, |ui| {
+    theme::tool_window(&ctx, "Models").open(&mut open).default_width(640.0).show(&ctx, |ui| {
         let project = &workspace.project;
         ui.weak("Packages written by squiggle-train. Events ▸ Classify runs the rules and every enabled model; predictions record each model's id. The catalogue, queue and Accept use the weighted ensemble.");
         if project.models().is_empty() {

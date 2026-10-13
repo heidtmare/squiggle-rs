@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, IoTaskPool, Task, futures::check_ready};
-use bevy::window::FileDragAndDrop;
+use bevy::window::{FileDragAndDrop, WindowCloseRequested};
 use squiggle_core::locate::Source;
 use squiggle_core::{
     Analyst, Change, Id, LabelId, Location, Op, PhenomenologyId, Project, RawLayout, Rgba, SampleBuf, Suggestion, Timestamp,
@@ -35,7 +35,7 @@ impl Plugin for WorkspacePlugin {
             .add_message::<WorkspaceRequest>()
             .add_systems(
                 Update,
-                (handle_drops, handle_requests, poll_dialog, poll_reads, poll_loads, sync_title).chain(),
+                (handle_drops, handle_close, handle_requests, poll_dialog, poll_reads, poll_loads, sync_title).chain(),
             );
     }
 }
@@ -58,12 +58,14 @@ pub enum WorkspaceRequest {
     Reload(Vec<Id>),
     /// Re-issues a request that was held back by the unsaved-project prompt.
     Discard(Box<WorkspaceRequest>),
+    /// Exits the app.
+    Quit,
 }
 
 impl WorkspaceRequest {
-    /// Requests that replace the current project.
+    /// Requests that replace (or close) the current project.
     fn replaces_project(&self) -> bool {
-        matches!(self, Self::New | Self::OpenDialog | Self::Open(_) | Self::Synthetic(_))
+        matches!(self, Self::New | Self::OpenDialog | Self::Open(_) | Self::Synthetic(_) | Self::Quit)
     }
 }
 
@@ -782,11 +784,19 @@ fn handle_drops(mut drops: MessageReader<FileDragAndDrop>, mut requests: Message
     }
 }
 
+/// Closing the window asks first, like File ▸ Quit, when there is unsaved work.
+fn handle_close(mut closes: MessageReader<WindowCloseRequested>, mut requests: MessageWriter<WorkspaceRequest>) {
+    if closes.read().count() > 0 {
+        requests.write(WorkspaceRequest::Quit);
+    }
+}
+
 fn handle_requests(
     mut requests: MessageReader<WorkspaceRequest>,
     mut workspace: ResMut<Workspace>,
     mut queue: ResMut<ImportQueue>,
     mut tasks: ResMut<Tasks>,
+    mut exit: MessageWriter<AppExit>,
 ) {
     for request in requests.read() {
         let request = match request {
@@ -864,6 +874,9 @@ fn handle_requests(
                 let project = workspace.project.id;
                 let task = load_traces(&mut workspace, Some(ids));
                 tasks.loads.push((project, task));
+            }
+            WorkspaceRequest::Quit => {
+                exit.write(AppExit::Success);
             }
             WorkspaceRequest::Discard(_) => {}
         }

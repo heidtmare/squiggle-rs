@@ -17,6 +17,7 @@ use crate::events_ui::open_event;
 use crate::plot::Plot;
 use crate::tracks::{Track, TrackView};
 use crate::workspace::Workspace;
+use crate::theme;
 
 /// A template named `name` from `event`'s members over `traces`, labelled as the event; `None` without member windows.
 pub fn template_change(project: &Project, traces: &[TraceData], data: &EventData, event: Id, name: &str) -> Option<Change> {
@@ -59,7 +60,7 @@ pub fn windows(
     let mut open = true;
     let mut change: Option<(&str, Change)> = None;
     let mut review: Option<Id> = None;
-    egui::Window::new("Templates").open(&mut open).default_width(560.0).show(&ctx, |ui| {
+    theme::tool_window(&ctx, "Templates").open(&mut open).default_width(560.0).show(&ctx, |ui| {
         let project = &workspace.project;
         ui.weak("Save an event as a template from Events ▸ Features. Classify votes the label of the best network correlation; Detect's matched filter finds repeats on sensors with templates.");
         if project.templates().is_empty() {

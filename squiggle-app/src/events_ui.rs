@@ -29,6 +29,7 @@ use crate::plot::Plot;
 use crate::process_ui::config_hash;
 use crate::tracks::{Track, TrackView};
 use crate::workspace::Workspace;
+use crate::theme;
 
 const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 190, 60);
 const GOOD_COLOR: egui::Color32 = egui::Color32::from_rgb(90, 210, 110);
@@ -627,7 +628,7 @@ fn detect_window(ctx: &egui::Context, windows: &mut EventWindows, workspace: &mu
     }
     let mut open = true;
     let mut apply: Option<(String, Vec<Change>)> = None;
-    egui::Window::new("Detect Events").open(&mut open).default_width(640.0).show(ctx, |ui| {
+    theme::tool_window(ctx, "Detect Events").open(&mut open).default_width(640.0).show(ctx, |ui| {
         ui.weak("Each track's plotted series streams through its phenomenology's detector; onsets are refined by AIC, then associated across sensors.");
         ui.checkbox(&mut windows.selected_only, "Selected tracks only");
         let chosen: Vec<&Track> =
@@ -694,7 +695,7 @@ fn detect_window(ctx: &egui::Context, windows: &mut EventWindows, workspace: &mu
         let project = &workspace.project;
         let busy = windows.task.is_some();
         ui.horizontal(|ui| {
-            if ui.add_enabled(!chosen.is_empty() && !busy && project.reference.is_some(), egui::Button::new("Detect")).clicked() {
+            if ui.add_enabled(!chosen.is_empty() && !busy && project.reference.is_some(), theme::primary("Detect")).clicked() {
                 let mut inputs = Vec::new();
                 for track in &chosen {
                     let (Some(trace), Some(series), Some(id)) = (project.trace(track.trace), &track.series, &track.phenomenology_id) else {
@@ -770,7 +771,7 @@ fn detect_window(ctx: &egui::Context, windows: &mut EventWindows, workspace: &mu
             ui.horizontal(|ui| {
                 let n = outcome.candidates.len();
                 let label = format!("Apply {n} event{}", if n == 1 { "" } else { "s" });
-                if ui.add_enabled(n > 0 || replaced > 0, egui::Button::new(label)).clicked() {
+                if ui.add_enabled(n > 0 || replaced > 0, theme::primary(label)).clicked() {
                     let changes = event_changes(project, &job.meta, outcome, job.reference, job.replace, &job.hash);
                     apply = Some((format!("Detect {n} events"), changes));
                 }
@@ -810,7 +811,7 @@ fn catalogue_window(
     let mut open = true;
     let mut changes: Option<(String, Vec<Change>)> = None;
     let mut review: Option<Id> = None;
-    egui::Window::new("Event Catalogue").open(&mut open).default_width(760.0).show(ctx, |ui| {
+    theme::tool_window(ctx, "Event Catalogue").open(&mut open).default_width(760.0).show(ctx, |ui| {
         let project = &workspace.project;
         windows.merge.retain(|id| project.event(*id).is_some());
         ui.horizontal(|ui| {
@@ -907,7 +908,7 @@ fn catalogue_window(
                         {
                             changes = Some(("Accept event".to_string(), vec![change]));
                         }
-                        if ui.add_enabled(event.status != EventStatus::Rejected, egui::Button::new("✘").small()).on_hover_text("Reject as noise (R)").clicked()
+                        if theme::danger(ui, event.status != EventStatus::Rejected, egui::Button::new("✘").small()).on_hover_text("Reject as noise (R)").clicked()
                             && let Some(change) = status_change(project, event.id, EventStatus::Rejected)
                         {
                             changes = Some(("Reject event".to_string(), vec![change]));

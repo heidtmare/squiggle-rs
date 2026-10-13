@@ -22,6 +22,7 @@ use crate::process_ui::config_hash;
 use crate::strips::colormap;
 use crate::tracks::{Track, TrackView};
 use crate::workspace::Workspace;
+use crate::theme;
 
 const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 190, 60);
 const GOOD_COLOR: egui::Color32 = egui::Color32::from_rgb(90, 210, 110);
@@ -380,7 +381,7 @@ fn pick_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &mut
     }
     let chosen = selected(tracks);
     let mut open = true;
-    egui::Window::new("Pick").open(&mut open).default_width(560.0).show(ctx, |ui| {
+    theme::tool_window(ctx, "Pick").open(&mut open).default_width(560.0).show(ctx, |ui| {
         ui.weak("One onset per selected track: an STA/LTA trigger refined by AIC, on the plotted series. Automatic picks take the first phase.");
         if view.event.is_some() {
             ui.weak("Within the event under review: its members and window only.");
@@ -428,7 +429,7 @@ fn pick_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &mut
 
         let busy = windows.pick_task.is_some();
         ui.horizontal(|ui| {
-            if ui.add_enabled(!present.is_empty() && !busy, egui::Button::new("Pick")).clicked() {
+            if ui.add_enabled(!present.is_empty() && !busy, theme::primary("Pick")).clicked() {
                 start_pick(windows, project, &chosen, view.event);
             }
             if busy {
@@ -483,7 +484,7 @@ fn pick_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &mut
                 .collect();
             ui.horizontal(|ui| {
                 let n = changes.len();
-                if ui.add_enabled(n > 0, egui::Button::new(format!("Apply {n} pick{}", if n == 1 { "" } else { "s" }))).clicked()
+                if ui.add_enabled(n > 0, theme::primary(format!("Apply {n} pick{}", if n == 1 { "" } else { "s" }))).clicked()
                     && workspace.execute_or_report(format!("Pick {n} track{}", if n == 1 { "" } else { "s" }), changes)
                 {
                     applied = true;
@@ -504,7 +505,7 @@ fn locate_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &m
     }
     let mut open = true;
     let mut changes: Option<(String, Vec<Change>)> = None;
-    egui::Window::new("Locate").open(&mut open).default_width(620.0).show(ctx, |ui| {
+    theme::tool_window(ctx, "Locate").open(&mut open).default_width(620.0).show(ctx, |ui| {
         let project = &workspace.project;
         let event = view.event;
         let scoped: Vec<&Pick> = project.picks().iter().filter(|p| p.event == event).collect();
@@ -580,7 +581,7 @@ fn locate_window(ctx: &egui::Context, windows: &mut LocateWindows, workspace: &m
         });
         let busy = windows.locate_task.is_some();
         ui.horizontal(|ui| {
-            if ui.add_enabled(usable.len() >= 2 && !busy && reference.is_some(), egui::Button::new("Locate")).clicked()
+            if ui.add_enabled(usable.len() >= 2 && !busy && reference.is_some(), theme::primary("Locate")).clicked()
                 && let Some(reference) = reference
             {
                 start_locate(windows, &usable, reference, event);

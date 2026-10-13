@@ -27,6 +27,7 @@ use crate::plot::Plot;
 use crate::synthetic;
 use crate::tracks::{Track, TrackView};
 use crate::workspace::{SampleState, Workspace, WorkspaceRequest};
+use crate::theme;
 
 const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 190, 60);
 /// Most feed messages handled per frame.
@@ -456,7 +457,7 @@ pub fn window(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut 
     let mut open = true;
     let mut assign: Vec<Change> = Vec::new();
     let mut stop_now = false;
-    egui::Window::new("Live Feed").open(&mut open).default_width(460.0).show(&ctx, |ui| {
+    theme::tool_window(&ctx, "Live Feed").open(&mut open).default_width(460.0).show(&ctx, |ui| {
         ui.weak(format!(
             "A {} server (e.g. squiggle-stream replaying files). Each channel is recorded to disk as it arrives and checkpointed into the project.",
             squiggle_io::stream::PROTOCOL
@@ -465,7 +466,7 @@ pub fn window(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut 
             ui.label("Server");
             ui.add_enabled(live.session.is_none(), egui::TextEdit::singleline(&mut live.endpoint).desired_width(180.0));
             if live.session.is_none() {
-                if ui.button("Connect").clicked() {
+                if ui.add(theme::primary("Connect")).clicked() {
                     live.status = None;
                     live.session = Some(Mutex::new(start(live.endpoint.clone(), &workspace, live.detect, false, None)));
                 }

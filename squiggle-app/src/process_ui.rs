@@ -16,6 +16,7 @@ use squiggle_core::{Alignment, Change, Id, LagMethod, Processing};
 use crate::plot::Plot;
 use crate::tracks::{Track, TrackView};
 use crate::workspace::Workspace;
+use crate::theme;
 
 const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 190, 60);
 const GOOD_COLOR: egui::Color32 = egui::Color32::from_rgb(90, 210, 110);
@@ -210,7 +211,7 @@ fn processing_window(ctx: &egui::Context, windows: &mut ProcessWindows, workspac
         return;
     }
     let mut open = true;
-    egui::Window::new("Filter and Detrend").open(&mut open).resizable(false).show(ctx, |ui| {
+    theme::tool_window(ctx, "Filter and Detrend").open(&mut open).resizable(false).show(ctx, |ui| {
         let draft = &mut windows.draft;
         egui::Grid::new("processing").num_columns(2).show(ui, |ui| {
             ui.label("Detrend");
@@ -284,7 +285,7 @@ fn processing_window(ctx: &egui::Context, windows: &mut ProcessWindows, workspac
         ui.separator();
         ui.horizontal(|ui| {
             let label = format!("Apply to {} track{}", changes.len(), if changes.len() == 1 { "" } else { "s" });
-            if ui.add_enabled(!changes.is_empty(), egui::Button::new(label)).clicked() {
+            if ui.add_enabled(!changes.is_empty(), theme::primary(label)).clicked() {
                 let n = changes.len();
                 workspace.execute_or_report(format!("Process {n} track{}", if n == 1 { "" } else { "s" }), changes);
             }
@@ -434,7 +435,7 @@ fn align_window(
         .or_else(|| chosen.first().copied());
 
     let mut open = true;
-    egui::Window::new("Align").open(&mut open).default_width(560.0).show(ctx, |ui| {
+    theme::tool_window(ctx, "Align").open(&mut open).default_width(560.0).show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.label("Reference");
             let text = reference.map_or("none — select tracks".to_string(), |t| format!("★ {}", t.code));
@@ -505,7 +506,7 @@ fn align_window(
         }
         ui.horizontal(|ui| {
             let busy = windows.task.is_some();
-            if ui.add_enabled(runnable && !busy, egui::Button::new("Measure")).clicked()
+            if ui.add_enabled(runnable && !busy, theme::primary("Measure")).clicked()
                 && let Some(reference) = reference
             {
                 view.reference = Some(reference.trace);
@@ -594,7 +595,7 @@ fn align_window(
             ui.horizontal(|ui| {
                 let n = changes.len();
                 let label = format!("Apply {n} offset{}", if n == 1 { "" } else { "s" });
-                if ui.add_enabled(n > 0, egui::Button::new(label)).clicked()
+                if ui.add_enabled(n > 0, theme::primary(label)).clicked()
                     && workspace.execute_or_report(format!("Align {n} track{} ({})", if n == 1 { "" } else { "s" }, results.method), changes)
                 {
                     applied = true;

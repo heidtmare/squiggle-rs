@@ -31,6 +31,7 @@ use crate::process_ui::{self, ProcessWindows};
 use crate::project_ui::{self, ProjectAccess, ProjectWindows};
 use crate::workspace::{SyntheticEvent, WorkspaceRequest};
 use crate::showcase::{LoadScene, Scene, Showcase};
+use crate::theme;
 use crate::tracks::{self, RowOrder, Track, TrackView};
 
 const HANDLE_WIDTH: f32 = 26.0;
@@ -41,6 +42,7 @@ const REDO: egui::KeyboardShortcut =
     egui::KeyboardShortcut::new(egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT), egui::Key::Z);
 const PASS_COLOR: egui::Color32 = egui::Color32::from_rgb(90, 210, 110);
 const FAIL_COLOR: egui::Color32 = egui::Color32::from_rgb(235, 80, 80);
+const UNSAVED_COLOR: egui::Color32 = egui::Color32::from_rgb(230, 180, 80);
 
 pub struct UiPlugin;
 
@@ -92,7 +94,6 @@ pub struct PlotCommands<'w> {
     remove: MessageWriter<'w, RemoveSquiggle>,
     fit: MessageWriter<'w, FitToData>,
     load: MessageWriter<'w, LoadScene>,
-    exit: MessageWriter<'w, AppExit>,
 }
 
 /// The tracks view, as the chrome needs it.
@@ -195,7 +196,7 @@ fn setup(mut commands: Commands, mut egui_settings: ResMut<EguiGlobalSettings>) 
 }
 
 /// Draws the chrome and hands the space left over to the plot camera.
-// A Bevy system declares everything it touches in its signature; eleven is
+// A Bevy system declares everything it touches in its signature; twelve is
 // what drawing the whole chrome needs.
 #[allow(clippy::too_many_arguments)]
 fn chrome(
@@ -210,9 +211,14 @@ fn chrome(
     mut commands: PlotCommands,
     mut project: ProjectAccess,
     mut tracks: TrackAccess,
+    mut fonts_installed: Local<bool>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?.clone();
     ctx.set_visuals(egui::Visuals::dark());
+    if !*fonts_installed {
+        theme::install_fonts(&ctx);
+        *fonts_installed = true;
+    }
 
     // Undo and redo, unless a text field has the keyboard.
     if !ctx.egui_wants_keyboard_input() {
@@ -237,7 +243,8 @@ fn chrome(
         .show(&mut root, |ui| {
             menu_bar(ui, &mut chrome, &mut squiggles, &mut commands, &mut project, &mut tracks, &plot);
             ui.separator();
-            toolbar(ui, &mut plot, &squiggles, &options, &mut commands, &mut tracks);
+            let unsaved = project.workspace.is_unsaved();
+            toolbar(ui, &mut plot, &squiggles, &options, &mut commands, &mut tracks, unsaved);
         })
         .response
         .rect
@@ -247,9 +254,10 @@ fn chrome(
         .resizable(false)
         .exact_size(HANDLE_WIDTH)
         .show_separator_line(false)
+        .frame(egui::Frame::side_top_panel(root.style()).inner_margin(egui::Margin::symmetric(3, 6)))
         .show(&mut root, |ui| {
             // The Java sidebar stacked rotated toggle buttons down its edge.
-            ui.toggle_value(&mut chrome.sidebar_open, vertical("Squiggles"))
+            sidebar_handle(ui, &mut chrome.sidebar_open, "Squiggles")
                 .on_hover_text("Show the squiggles in this plot");
         })
         .response
@@ -282,6 +290,7 @@ fn chrome(
     transform_error_window(&ctx, &mut chrome);
 
     hand_viewport_to_plot(&window, &mut camera, &mut plot, left, right, top);
+    theme::set_plot_rect(&ctx, egui::Rect::from_min_size(plot.origin.to_array().into(), egui::vec2(plot.view.width as f32, plot.view.height as f32)));
     Ok(())
 }
 
@@ -298,8 +307,8 @@ fn menu_bar(
         ui.menu_button("File", |ui| {
             project_ui::file_menu(ui, project);
             ui.separator();
-            if ui.button("Close").clicked() {
-                commands.exit.write(AppExit::Success);
+            if ui.button("Quit").clicked() {
+                project.requests.write(WorkspaceRequest::Quit);
                 ui.close();
             }
         });
@@ -575,7 +584,7 @@ fn transform_window(ctx: &egui::Context, chrome: &mut Chrome) {
     }
 
     let settings = &mut chrome.transforms;
-    egui::Window::new("Transform Settings")
+    theme::tool_window(ctx, "Transform Settings")
         .collapsible(false)
         .resizable(false)
         .open(&mut chrome.transform_settings_open)
@@ -643,9 +652,7 @@ fn transform_error_window(ctx: &egui::Context, chrome: &mut Chrome) {
     };
 
     let mut open = true;
-    egui::Window::new("Transform Failed")
-        .collapsible(false)
-        .resizable(false)
+    theme::dialog(ctx, "Transform Failed")
         .open(&mut open)
         .show(ctx, |ui| {
             ui.label(message);
@@ -677,6 +684,7 @@ fn toolbar(
     options: &DemoOptions,
     commands: &mut PlotCommands,
     tracks: &mut TrackAccess,
+    unsaved: bool,
 ) {
     ui.horizontal(|ui| {
         let mode = &mut *tracks.mode;
@@ -719,7 +727,13 @@ fn toolbar(
             .on_hover_text("Drag to pan, scroll to zoom, click to select");
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(egui::RichText::new(&plot.name).weak());
+            if unsaved {
+                ui.label(egui::RichText::new(&plot.name).color(UNSAVED_COLOR))
+                    .on_hover_text("Never saved; File ▸ Save Project As… keeps it");
+                ui.label(egui::RichText::new("●").color(UNSAVED_COLOR));
+            } else {
+                ui.label(egui::RichText::new(&plot.name).weak());
+            }
         });
     });
 }
@@ -750,7 +764,7 @@ fn squiggle_list(
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                    if theme::danger(ui, true, egui::Button::new("✕").small()).on_hover_text("Remove").clicked() {
                         commands.remove.write(RemoveSquiggle(entity));
                     }
                 });
@@ -825,9 +839,7 @@ fn about_window(ctx: &egui::Context, chrome: &mut Chrome) {
         return;
     }
 
-    egui::Window::new("About Squiggle")
-        .collapsible(false)
-        .resizable(false)
+    theme::dialog(ctx, "About Squiggle")
         .open(&mut chrome.about_open)
         .show(ctx, |ui| {
             ui.label("Squiggle — a waveform plot.");
@@ -889,8 +901,26 @@ fn swatch(ui: &mut egui::Ui, color: Rgba) {
     );
 }
 
-/// Stacks a label's characters so it reads down a narrow strip, standing in
-/// for the rotated handle of the Java sidebar.
-fn vertical(text: &str) -> String {
-    text.chars().map(String::from).collect::<Vec<_>>().join("\n")
+/// A toggle whose label reads up a narrow strip, standing in for the rotated
+/// handle of the Java sidebar.
+fn sidebar_handle(ui: &mut egui::Ui, open: &mut bool, text: &str) -> egui::Response {
+    const PADDING: f32 = 12.0;
+    let galley = ui.painter().layout_no_wrap(text.to_string(), egui::FontId::proportional(13.0), egui::Color32::PLACEHOLDER);
+    let size = egui::vec2(ui.available_width(), galley.size().x + 2.0 * PADDING);
+    let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if response.clicked() {
+        *open = !*open;
+        response.mark_changed();
+    }
+    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, *open, text));
+
+    let visuals = ui.style().interact_selectable(&response, *open);
+    let painter = ui.painter();
+    painter.rect(rect, visuals.corner_radius, visuals.weak_bg_fill, visuals.bg_stroke, egui::StrokeKind::Inside);
+    let corner = rect.center() - galley.size() / 2.0;
+    painter.add(
+        egui::epaint::TextShape::new(corner, galley, visuals.text_color())
+            .with_angle_and_anchor(-std::f32::consts::FRAC_PI_2, egui::Align2::CENTER_CENTER),
+    );
+    response
 }

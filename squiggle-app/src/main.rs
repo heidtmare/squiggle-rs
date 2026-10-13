@@ -10,6 +10,7 @@ mod classify_ui;
 mod live;
 mod live_ui;
 mod sync_ui;
+mod theme;
 mod models_ui;
 mod scatter_ui;
 mod templates_ui;
@@ -54,6 +55,8 @@ fn main() -> AppExit {
                 resolution,
                 ..default()
             }),
+            // Closing asks first when the project is unsaved (workspace::handle_close).
+            close_when_requested: false,
             ..default()
         })
         .build();

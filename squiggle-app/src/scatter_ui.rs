@@ -20,6 +20,7 @@ use crate::models_ui::ModelRegistry;
 use crate::plot::Plot;
 use crate::tracks::{Track, TrackView};
 use crate::workspace::Workspace;
+use crate::theme;
 
 const PALETTE: [egui::Color32; 10] = [
     egui::Color32::from_rgb(110, 170, 240),
@@ -190,7 +191,7 @@ pub fn windows(
     let mut open = true;
     let mut change: Option<(String, Vec<Change>)> = None;
     let mut review: Option<Id> = None;
-    egui::Window::new("Event Scatter").open(&mut open).default_width(620.0).show(&ctx, |ui| {
+    theme::tool_window(&ctx, "Event Scatter").open(&mut open).default_width(620.0).show(&ctx, |ui| {
         let project = &workspace.project;
         let dims: Vec<String> = match &package {
             Some(p) => {
@@ -434,7 +435,7 @@ pub fn windows(
                     let changes: Vec<Change> = ids.iter().filter_map(|id| accept_change(project, *id)).collect();
                     change = Some((format!("Accept {} events", changes.len()), changes));
                 }
-                if ui.button("Reject").clicked() {
+                if theme::danger(ui, true, egui::Button::new("Reject")).clicked() {
                     let changes: Vec<Change> = ids.iter().filter_map(|id| status_change(project, *id, EventStatus::Rejected)).collect();
                     change = Some((format!("Reject {} events", changes.len()), changes));
                 }

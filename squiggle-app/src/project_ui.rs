@@ -12,6 +12,7 @@ use squiggle_core::{
 };
 
 use crate::workspace::{ImportQueue, SampleState, UNASSIGNED_COLOR, Workspace, WorkspaceRequest};
+use crate::theme;
 
 const PROBLEM_COLOR: egui::Color32 = egui::Color32::from_rgb(235, 80, 80);
 const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 190, 60);
@@ -185,9 +186,9 @@ fn import_window(
 
     let mut open = true;
     let mut confirm = false;
-    egui::Window::new("Import Waveforms")
+    theme::dialog(ctx, "Import Waveforms")
         .default_width(980.0)
-        .collapsible(false)
+        .resizable(true)
         .open(&mut open)
         .show(ctx, |ui| {
             let project = &workspace.project;
@@ -278,7 +279,7 @@ fn import_window(
             ui.separator();
             ui.horizontal(|ui| {
                 let count = queue.rows.iter().filter(|r| r.include).count();
-                confirm = ui.add_enabled(count > 0, egui::Button::new(format!("Import {count}"))).clicked();
+                confirm = ui.add_enabled(count > 0, theme::primary(format!("Import {count}"))).clicked();
             });
         });
 
@@ -298,7 +299,7 @@ fn sensors_window(ctx: &egui::Context, workspace: &mut Workspace, windows: &mut 
     let mut changes = Vec::new();
     let mut located: Option<(String, Change)> = None;
     let drafts = &mut windows.location_drafts;
-    egui::Window::new("Sensors").default_width(760.0).open(&mut windows.sensors_open).show(ctx, |ui| {
+    theme::tool_window(ctx, "Sensors").default_width(760.0).open(&mut windows.sensors_open).show(ctx, |ui| {
         let project = &workspace.project;
         if project.sensors().is_empty() {
             ui.label("No sensors. Import waveforms with File ▸ Import Waveforms…, or drop files on the window.");
@@ -380,7 +381,7 @@ fn sensors_window(ctx: &egui::Context, workspace: &mut Workspace, windows: &mut 
                             Some(color) => status.color(color),
                             None => status.weak(),
                         });
-                        if ui.small_button("✕").on_hover_text("Remove trace from project").clicked() {
+                        if theme::danger(ui, true, egui::Button::new("✕").small()).on_hover_text("Remove trace from project").clicked() {
                             changes.push(Change::RemoveTrace { trace: trace.id });
                         }
                     });
@@ -404,7 +405,7 @@ fn phenomenologies_window(ctx: &egui::Context, workspace: &Workspace, windows: &
     }
 
     let mut edit = None;
-    egui::Window::new("Phenomenologies").default_width(640.0).open(&mut windows.phenomenologies_open).show(ctx, |ui| {
+    theme::tool_window(ctx, "Phenomenologies").default_width(640.0).open(&mut windows.phenomenologies_open).show(ctx, |ui| {
         egui::Grid::new("phenomenologies").striped(true).num_columns(7).show(ui, |ui| {
             for heading in ["Name", "Id", "Quantity", "Samples", "Propagation", "Ver", ""] {
                 ui.strong(heading);
@@ -549,7 +550,7 @@ fn editor_window(ctx: &egui::Context, workspace: &mut Workspace, windows: &mut P
     let mut open = true;
     let mut save = false;
     let title = if draft.replaces.is_some() { "Edit Phenomenology" } else { "New Phenomenology" };
-    egui::Window::new(title).collapsible(false).resizable(false).open(&mut open).show(ctx, |ui| {
+    theme::dialog(ctx, title).open(&mut open).show(ctx, |ui| {
         egui::Grid::new("phenomenology_editor").num_columns(2).show(ui, |ui| {
             ui.label("Id");
             ui.add_enabled(draft.replaces.is_none(), egui::TextEdit::singleline(&mut draft.id).hint_text("e.g. hydroacoustic"));
@@ -598,7 +599,7 @@ fn editor_window(ctx: &egui::Context, workspace: &mut Workspace, windows: &mut P
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(name).desired_width(80.0));
                         ui.add(egui::DragValue::new(speed).range(1e-3..=3e8).suffix(" m/s"));
-                        if ui.small_button("✕").clicked() {
+                        if theme::danger(ui, true, egui::Button::new("✕").small()).clicked() {
                             remove = Some(index);
                         }
                     });
@@ -619,7 +620,7 @@ fn editor_window(ctx: &egui::Context, workspace: &mut Workspace, windows: &mut P
         if let Some(version) = draft.replaces {
             ui.label(egui::RichText::new(format!("Saves as v{}; existing assignments keep v{version}.", version + 1)).weak());
         }
-        save = ui.button("Save").clicked();
+        save = ui.add(theme::primary("Save")).clicked();
     });
 
     if save {
@@ -642,13 +643,13 @@ fn discard_window(ctx: &egui::Context, workspace: &mut Workspace, requests: &mut
     };
 
     let mut decided = None;
-    egui::Window::new("Unsaved Project").collapsible(false).resizable(false).show(ctx, |ui| {
+    theme::dialog(ctx, "Unsaved Project").show(ctx, |ui| {
         ui.label("This project has not been saved. Discard it?");
         ui.horizontal(|ui| {
-            if ui.button("Discard").clicked() {
+            if theme::danger(ui, true, egui::Button::new("Discard")).clicked() {
                 decided = Some(true);
             }
-            if ui.button("Save As…").clicked() {
+            if ui.add(theme::primary("Save As…")).clicked() {
                 decided = Some(false);
                 requests.write(WorkspaceRequest::SaveAsDialog);
             }
@@ -673,7 +674,7 @@ fn error_window(ctx: &egui::Context, workspace: &mut Workspace) {
         return;
     };
     let mut open = true;
-    egui::Window::new("Project Error").collapsible(false).resizable(false).open(&mut open).show(ctx, |ui| {
+    theme::dialog(ctx, "Project Error").open(&mut open).show(ctx, |ui| {
         ui.label(message);
     });
     if !open {

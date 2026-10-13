@@ -31,6 +31,7 @@ use crate::templates_ui::template_change;
 use crate::process_ui::config_hash;
 use crate::tracks::{Track, TrackView};
 use crate::workspace::Workspace;
+use crate::theme;
 
 const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 190, 60);
 const EXPLOSIVE_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 140, 70);
@@ -458,7 +459,7 @@ fn classify_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace
         return;
     }
     let mut open = true;
-    egui::Window::new("Classify Events").open(&mut open).default_width(420.0).show(ctx, |ui| {
+    theme::tool_window(ctx, "Classify Events").open(&mut open).default_width(420.0).show(ctx, |ui| {
         ui.weak("Features from each member's plotted series, then the rules classifier and every enabled model (Events ▸ Models). Each run replaces the events' predictions and never changes their status or label.");
         let s = &mut windows.settings;
         egui::CollapsingHeader::new("Rules").default_open(true).show(ui, |ui| {
@@ -508,7 +509,7 @@ fn classify_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace
         });
         ui.horizontal(|ui| {
             let busy = windows.task.is_some();
-            if ui.add_enabled(n > 0 && !busy, egui::Button::new(format!("Classify {n} events"))).clicked() {
+            if ui.add_enabled(n > 0 && !busy, theme::primary(format!("Classify {n} events"))).clicked() {
                 let values = track_values(tracks);
                 let traces = trace_data(project, |t| values.get(&t.id).cloned());
                 let events = all_events(project, &traces);
@@ -609,7 +610,7 @@ fn features_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace
     }
     let Some(id) = view.event.filter(|id| workspace.project.event(*id).is_some()) else {
         let mut open = true;
-        egui::Window::new("Event Features").open(&mut open).show(ctx, |ui| {
+        theme::tool_window(ctx, "Event Features").open(&mut open).show(ctx, |ui| {
             ui.label("Review an event (Events ▸ Catalogue) to see its features.");
         });
         windows.features_open = open;
@@ -640,7 +641,7 @@ fn features_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace
     }
     let mut open = true;
     let mut change: Option<(String, Change)> = None;
-    egui::Window::new("Event Features").open(&mut open).default_width(560.0).show(ctx, |ui| {
+    theme::tool_window(ctx, "Event Features").open(&mut open).default_width(560.0).show(ctx, |ui| {
         let project = &workspace.project;
         let event = project.event(id).expect("checked above");
         let Some((.., result)) = &windows.panel else {
@@ -790,7 +791,7 @@ fn labels_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace: 
     }
     let mut open = true;
     let mut change: Option<(String, Change)> = None;
-    egui::Window::new("Labels").open(&mut open).default_width(420.0).show(ctx, |ui| {
+    theme::tool_window(ctx, "Labels").open(&mut open).default_width(420.0).show(ctx, |ui| {
         let project = &workspace.project;
         let taxonomy = project.taxonomy();
         ui.weak(format!("Taxonomy version {}. Keys 1–9 label the reviewed event in this order. Rejected events export as \"{NOISE}\".", taxonomy.version));
@@ -810,7 +811,7 @@ fn labels_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace: 
                 let used = project.events().iter().filter(|e| e.label.as_ref() == Some(&label.id)).count();
                 let parent = taxonomy.labels.iter().any(|l| l.parent.as_ref() == Some(&label.id));
                 let tip = if used > 0 { format!("{used} events carry it") } else if parent { "Has subtypes".to_string() } else { "Remove".to_string() };
-                if ui.add_enabled(used == 0 && !parent, egui::Button::new("🗑").small()).on_hover_text(tip).clicked() {
+                if theme::danger(ui, used == 0 && !parent, egui::Button::new("🗑").small()).on_hover_text(tip).clicked() {
                     change = Some(("Remove label".to_string(), Change::RemoveLabel { label: label.id.clone() }));
                 }
                 ui.end_row();
@@ -875,7 +876,7 @@ fn export_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace: 
         return;
     }
     let mut open = true;
-    egui::Window::new("Export Dataset").open(&mut open).default_width(420.0).show(ctx, |ui| {
+    theme::tool_window(ctx, "Export Dataset").open(&mut open).default_width(420.0).show(ctx, |ui| {
         let project = &workspace.project;
         let labelled = project.events().iter().filter(|e| training_class(e).is_some()).count();
         let rejected = project.events().iter().filter(|e| e.status == EventStatus::Rejected).count();
@@ -914,7 +915,7 @@ fn export_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace: 
         let busy = windows.folder.is_some() || windows.export.is_some();
         ui.horizontal(|ui| {
             let n = if windows.include_unlabelled { project.events().len() } else { labelled };
-            if ui.add_enabled(n > 0 && !busy, egui::Button::new(format!("Export {n} events…"))).clicked() {
+            if ui.add_enabled(n > 0 && !busy, theme::primary(format!("Export {n} events…"))).clicked() {
                 windows.exported = None;
                 windows.folder = Some(IoTaskPool::get().spawn(async {
                     if let Some(path) = crate::tour::picked() {
