@@ -378,6 +378,9 @@ pub fn windows(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut
             if ui.add_enabled(!busy, egui::Button::new("Import package…")).clicked() {
                 windows.error = None;
                 windows.folder = Some(IoTaskPool::get().spawn(async {
+                    if let Some(path) = crate::tour::picked() {
+                        return Some(path);
+                    }
                     let folder = rfd::AsyncFileDialog::new().set_title("Import model package (folder with spec.toml)").pick_folder().await?;
                     Some(folder.path().to_path_buf())
                 }));

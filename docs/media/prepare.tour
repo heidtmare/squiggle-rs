@@ -1,0 +1,58 @@
+# Exports the datasets the showcase's model and cluster packages are trained
+# on. Run from the repository root; see record.sh.
+
+# Training catalogue: detect, classify, accept everything, export.
+click "Demo"
+click "Synthetic training catalogue"
+wait 4
+click "Events"
+click "Detect…"
+click "Detect"
+waitfor "Apply*" 30
+wait 0.5
+click "Apply*"
+wait 1
+click "Close window"
+click "Events"
+click "Classify…"
+wait 0.5
+click "Classify 4*"
+wait 5
+click "Close window"
+click "Events"
+click "Scatter…"
+wait 1.5
+drag 0.035,0.13 0.48,0.13 0.48,0.58 0.035,0.58 0.035,0.13 2
+wait 0.5
+click "Accept"
+wait 1
+click "Close window"
+click "Events"
+click "Export dataset…"
+wait 1
+pick "target/showcase/catalogue"
+click "Export 40*"
+wait 4
+click "Close window"
+
+# Event families, unlabelled, for clustering.
+click "Demo"
+click "Synthetic event families"
+click "Discard"
+wait 4
+click "Events"
+click "Detect…"
+click "Detect"
+wait 1
+waitfor "Apply*" 30
+wait 0.5
+click "Apply*"
+wait 1
+click "Close window"
+click "Events"
+click "Export dataset…"
+wait 1
+click "Include unlabelled events (class left empty)"
+pick "target/showcase/families"
+click "Export 2*"
+wait 4

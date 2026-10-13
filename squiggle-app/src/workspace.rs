@@ -823,6 +823,9 @@ fn handle_requests(
             WorkspaceRequest::SaveAsDialog => {
                 let name = format!("{}.{PROJECT_EXTENSION}", workspace.project.name);
                 tasks.dialog = Some(IoTaskPool::get().spawn(async move {
+                    if let Some(path) = crate::tour::picked() {
+                        return Some(DialogOutcome::SaveAs(path));
+                    }
                     let file = project_dialog().set_title("Save project as").set_file_name(name).save_file().await?;
                     Some(DialogOutcome::SaveAs(file.path().to_path_buf()))
                 }));

@@ -4,6 +4,10 @@ An interactive waveform plotter built on [Bevy](https://bevy.org). Pan, zoom
 and pick your way around hundreds of high-density polylines at once, then run
 them through Fourier and wavelet transforms without leaving the plot.
 
+[![Squiggle showcase: click for the full video](docs/media/showcase.gif)](docs/media/showcase.mp4)
+
+*Highlights; click for the [full tour](docs/media/showcase.mp4) (4:44).*
+
 ## Features
 
 - **Fast at scale.** Samples are uploaded to the GPU once and projected in a
@@ -107,6 +111,8 @@ already compiles dependencies with optimizations in dev profiles.
 | `--samples N` | Samples per demo squiggle |
 | `--demo fourier\|wavelet` | Load a transform demo at startup |
 | `--screenshot FILE` | Save the window once the plot settles, then quit |
+| `--tour SCRIPT` | Drive the app with a scripted tour, headless, then quit (see [`tour.rs`](squiggle-app/src/tour.rs)) |
+| `--record OUT.mp4` | Record the tour at 1080p30 (needs `ffmpeg`); `docs/media/record.sh` makes the showcase |
 
 ## Using it
 

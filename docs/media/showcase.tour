@@ -1,0 +1,297 @@
+# The README showcase. Run by record.sh with --squiggles 100 --samples 10000.
+
+title "Squiggle" "Interactive waveform analysis in Rust and Bevy"
+wait 3.5
+title
+
+# --- Overlay: scale, zoom, picking -----------------------------------------
+caption "100 squiggles × 10,000 samples, projected on the GPU: pan and zoom cost nothing per point"
+wait 1.5
+drag 0.6,0.5 0.4,0.42 1.2
+scroll 0.5,0.5 10 1.2
+wait 0.3
+caption "Zoom time and amplitude independently (Ctrl / Alt + scroll), anchored under the cursor"
+scroll 0.5,0.5 12 1.2 ctrl
+scroll 0.5,0.5 -6 1 alt
+wait 0.3
+caption "Click a line to select it and see its individual samples"
+click 0.5,0.5
+wait 1.8
+click "Fit"
+wait 0.8
+
+# --- Transforms -------------------------------------------------------------
+caption "Fourier, DFT, FFT, STFT, inverse and wavelet transforms, with self-checking demos"
+click "Demo"
+click "Fourier"
+wait 3.5
+click "Demo"
+click "Wavelet"
+wait 3.5
+click "Close"
+
+# --- Tracks, spectrograms, filters, alignment --------------------------------
+caption "Stacked multi-sensor tracks share one time axis, whatever their sample rates"
+click "Demo"
+click "Synthetic event (alignment)"
+wait 2.5
+scroll 0.55,0.55 4 1
+drag 0.55,0.55 0.62,0.55 0.8
+wait 0.5
+caption "Spectrogram strips per row"
+rclick 0.6,0.129
+click "Waveform over spectrogram"
+wait 0.5
+rclick 0.6,0.256
+click "Waveform over spectrogram"
+wait 2
+caption "Detrend, taper and Butterworth filters per trace, saved in the project"
+click 0.06,0.389 0.3
+click 0.06,0.514 0.3
+click 0.06,0.639 0.3
+click 0.06,0.764 0.3
+click 0.06,0.889 0.3
+click "Process"
+click "Filter and detrend*"
+wait 1
+click "Apply to*"
+wait 1.5
+click "Close window"
+dclick 0.6,0.6
+wait 1
+caption "Cross-correlation delays reconciled across every pair by least squares, within ms of truth"
+rclick 0.06,0.639
+click "Use as alignment reference"
+click "Process"
+click "Align…"
+wait 0.8
+click "Measure"
+wait 2.5
+click "Apply*"
+wait 1.5
+click "Close window"
+caption "Every edit undoes and redoes (Cmd+Z / Shift+Cmd+Z)"
+key Z cmd
+wait 1.2
+key Z cmd shift
+wait 1.2
+
+# --- Picking and location -----------------------------------------------------
+caption "Picking and location across phenomenologies: EMP, seismic and infrasound"
+click "Demo"
+click "Synthetic located event"
+click "Discard"
+wait 2.5
+click 0.06,0.107 0.25
+click 0.06,0.181 0.25
+click 0.06,0.254 0.25
+click 0.06,0.329 0.25
+click 0.06,0.403 0.25
+click 0.06,0.476 0.25
+click 0.06,0.551 0.25
+click 0.06,0.625 0.25
+click 0.06,0.699 0.25
+click 0.06,0.772 0.25
+click 0.06,0.846 0.25
+click 0.06,0.919 0.25
+caption "STA/LTA onsets refined by AIC"
+click "Process"
+click "Pick…"
+wait 0.8
+click "Pick"@2
+wait 2
+click "Apply*"
+wait 1
+click "Close window"
+caption "Grid search over position, depth and origin time: EMP anchors the origin, slower phases the position"
+click "Process"
+click "Locate…"
+wait 0.8
+click "Locate"@2
+wait 4
+click "Save origin"
+wait 0.8
+caption "Remove moveout lines up arrivals of every phenomenology at the origin"
+click "Remove moveout*"
+wait 1.5
+click "Close window"
+dclick 0.6,0.6
+wait 2.5
+
+# --- Events ---------------------------------------------------------------------
+caption "Streaming detectors on every track; onsets associated across sensors, located and pruned"
+click "Demo"
+click "Synthetic swarm"
+click "Discard"
+wait 2.5
+click "Events"
+click "Detect…"
+click "Detect"
+wait 1
+waitfor "Apply*" 30
+wait 2
+click "Apply*"
+wait 1
+click "Close window"
+caption "A catalogue to review, accept, reject, split and merge"
+click "Events"
+click "Catalogue…"
+wait 1.5
+click "Review"
+wait 2
+key A
+wait 1
+key ]
+wait 1.5
+key A
+wait 1
+click "Close window"
+wait 1.5
+key Escape
+wait 0.5
+
+# --- Classification -------------------------------------------------------------
+caption "Classification: earthquake / explosion discriminants and a transparent rules classifier"
+click "Demo"
+click "Synthetic earthquakes and explosions"
+click "Discard"
+wait 2.5
+click "Events"
+click "Detect…"
+click "Detect"
+wait 1
+waitfor "Apply*" 30
+wait 1
+click "Apply*"
+wait 1
+click "Close window"
+click "Events"
+click "Classify…"
+wait 0.8
+click "Classify 1*"
+wait 2.5
+click "Close window"
+click "Events"
+click "Catalogue…"
+wait 2.5
+click "Review"
+wait 1
+click "Close window"
+caption "Per-event features and each rule's evidence"
+click "Events"
+click "Features…"
+wait 4
+
+# --- Models ----------------------------------------------------------------------
+click "Close window"
+caption "Offline models from squiggle-train (here a random forest), imported and run in a weighted ensemble"
+click "Events"
+click "Models…"
+wait 0.8
+pick "target/showcase/forest"
+click "Import package…"
+wait 3
+click "Close window"
+click "Events"
+click "Classify…"
+wait 0.8
+click "Classify 1*"
+wait 2
+click "Close window"
+click "Events"
+click "Features…"
+wait 4
+click "Close window"
+key Escape
+
+# --- Templates, matched filter, clusters ----------------------------------------
+caption "Templates: save a reviewed event, then a matched filter finds its weak repeats"
+click "Demo"
+click "Synthetic event families"
+click "Discard"
+wait 2.5
+click "Events"
+click "Detect…"
+click "Detect"
+wait 1
+waitfor "Apply*" 30
+wait 0.5
+click "Apply*"
+wait 1
+click "Close window"
+click "Events"
+click "Catalogue…"
+wait 1
+click "Review"
+wait 0.5
+click "Close window"
+click "Events"
+click "Features…"
+wait 1
+click "Save as template"+-150,0
+type "Quarry A"
+wait 0.3
+click "Save as template"
+wait 1.5
+click "Close window"
+click "Events"
+click "Templates…"
+wait 2.5
+click "Close window"
+key Escape
+caption "PCA and DBSCAN clusters, trained offline and imported like a model, in a scatter view"
+click "Events"
+click "Models…"
+wait 0.5
+pick "target/showcase/clusters"
+click "Import package…"
+wait 2
+click "Close window"
+click "Events"
+click "Scatter…"
+wait 1
+click "Event features"
+click "cluster@1"
+wait 0.5
+click "Analyst label"
+click "Cluster"
+wait 2
+caption "Lasso a cluster to label, accept or reject it in one step"
+drag 0.095,0.145 0.15,0.145 0.15,0.195 0.095,0.195 0.095,0.145 1.5
+wait 1
+click "Accept"
+wait 2
+click "Close window"
+
+# --- Shared projects ---------------------------------------------------------------
+caption "Shared projects: sync edits through squiggle-server; analyst judgements never silently lost"
+pick "target/showcase/families.squiggle"
+click "File"
+click "Save Project As…"
+wait 1.5
+click "Project"
+click "Shared project…"
+wait 1
+click "Share this project"
+wait 3
+click "Close window"
+
+# --- Live -----------------------------------------------------------------------------
+caption "Live feeds: recorded as they arrive, plotted as they grow, and detected on a sliding window"
+click "Demo"
+click "Live replay of event families"
+wait 4
+click "Close window"
+click "Fit"
+wait 8
+click "Fit"
+wait 6
+caption "Each event is added once no later arrival could change it"
+click "Events"
+click "Catalogue…"
+wait 4
+click "Close window"
+
+caption
+title "Squiggle" "github.com/heidtmare/squiggle-rs"
+wait 4
