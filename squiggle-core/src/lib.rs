@@ -1,7 +1,6 @@
 //! Core model and coordinate math for Squiggle.
 //!
-//! This crate is a port of the `squiggle-core` Java module. Unlike the original
-//! it has no rendering dependencies: it owns the plot *model* (squiggles,
+//! This crate has no rendering dependencies: it owns the plot *model* (squiggles,
 //! points, styles, axes) and the *math* that maps between cartesian data space
 //! and plot-screen pixels, plus the signal transforms (Fourier, wavelet) that
 //! derive new squiggles from old. Rendering lives in `squiggle-app`.

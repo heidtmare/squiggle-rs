@@ -6,7 +6,7 @@ use crate::transform::Spectrum;
 use crate::view::{Coord, PlotView};
 
 /// A single sample. `z` and `m` are optional measures carried alongside the
-/// plotted `x`/`y`; the Java original signalled their absence with `NaN`.
+/// plotted `x`/`y`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Point {
     pub x: f64,
@@ -75,7 +75,7 @@ impl Bounds {
     }
 }
 
-/// How a squiggle is painted. Ported from `RenderingAttributes`.
+/// How a squiggle is painted.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Style {
     pub stroke: Rgba,
@@ -201,7 +201,7 @@ impl Squiggle {
         self.spectrum = None;
     }
 
-    /// Flips selection, as the Java `pick` handler did.
+    /// Flips selection.
     pub fn toggle_selected(&mut self) {
         self.selected = !self.selected;
     }
@@ -222,8 +222,7 @@ impl Squiggle {
     /// Distance in screen pixels from `screen` to the nearest point on this
     /// squiggle, or `None` if nothing lies within `tolerance`.
     ///
-    /// Segments entirely off-screen are skipped, which is what the Java
-    /// renderer's culling margin did for drawing.
+    /// Segments entirely beyond the culling margin are skipped.
     pub fn screen_distance_within(
         &self,
         view: &PlotView,

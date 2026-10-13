@@ -1,7 +1,6 @@
 //! Squiggle: an interactive waveform plot.
 //!
-//! A port of the JavaFX application of the same name. The plot model and its
-//! coordinate math live in `squiggle-core`; this crate renders them with Bevy
+//! The plot model and its coordinate math live in `squiggle-core`; this crate renders them with Bevy
 //! and wraps them in an egui shell.
 
 mod demo;
@@ -69,7 +68,7 @@ fn main() -> AppExit {
     }
 
     App::new()
-        // The Java plot painted onto a black canvas.
+        // The plot paints onto a black canvas.
         .insert_resource(ClearColor(Color::BLACK))
         .add_plugins(plugins)
         .add_plugins(EguiPlugin::default())

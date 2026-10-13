@@ -1,7 +1,6 @@
 //! Mapping between cartesian data space and plot-screen pixels.
 //!
-//! This is the transform half of the Java `RenderingContext`. Screen space uses
-//! the JavaFX convention: pixels, origin top-left, +y down. Cartesian space is
+//! Screen space is pixels, origin top-left, +y down. Cartesian space is
 //! the data's own space with +y up.
 
 use core::fmt;
@@ -190,10 +189,8 @@ impl PlotView {
 
 /// Shortest distance from `point` to the segment `start`..`end`.
 ///
-/// Used for picking: the Java version rendered the scene a second time in
-/// unique colours and read back the pixel under the cursor, which cost a full
-/// extra draw and a GPU readback per click. Measuring the distance directly is
-/// both cheaper and exact.
+/// Used for picking: measuring the distance directly is exact, and cheaper than
+/// rendering an ID buffer and reading back the pixel under the cursor.
 pub fn distance_to_segment(point: Coord, start: Coord, end: Coord) -> f64 {
     let (dx, dy) = (end.x - start.x, end.y - start.y);
     let length_squared = dx * dx + dy * dy;

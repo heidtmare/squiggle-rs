@@ -28,7 +28,7 @@ trap 'kill $server' EXIT
 
 # README preview: a clip of each scene (times from the tour's caption log),
 # 10 fps, 720 px wide.
-clips="[0:v]trim=4.5:11,setpts=PTS-STARTPTS[v0];[0:v]trim=23:26.5,setpts=PTS-STARTPTS[v1];[0:v]trim=37:41,setpts=PTS-STARTPTS[v2];[0:v]trim=58.5:62,setpts=PTS-STARTPTS[v3];[0:v]trim=95.5:100,setpts=PTS-STARTPTS[v4];[0:v]trim=112.5:117,setpts=PTS-STARTPTS[v5];[0:v]trim=162:166,setpts=PTS-STARTPTS[v6];[0:v]trim=230:238,setpts=PTS-STARTPTS[v7];[0:v]trim=263:270,setpts=PTS-STARTPTS[v8]"
+clips="[0:v]trim=4.5:11,setpts=PTS-STARTPTS[v0];[0:v]trim=20:24,setpts=PTS-STARTPTS[v1];[0:v]trim=40:44,setpts=PTS-STARTPTS[v2];[0:v]trim=58.5:62,setpts=PTS-STARTPTS[v3];[0:v]trim=97:101.5,setpts=PTS-STARTPTS[v4];[0:v]trim=113:117.5,setpts=PTS-STARTPTS[v5];[0:v]trim=162:166,setpts=PTS-STARTPTS[v6];[0:v]trim=234:242,setpts=PTS-STARTPTS[v7];[0:v]trim=264:271,setpts=PTS-STARTPTS[v8]"
 ffmpeg -y -loglevel error -i docs/media/showcase.mp4 -filter_complex \
     "$clips;[v0][v1][v2][v3][v4][v5][v6][v7][v8]concat=n=9:v=1:a=0,fps=10,scale=720:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" \
     docs/media/showcase.gif

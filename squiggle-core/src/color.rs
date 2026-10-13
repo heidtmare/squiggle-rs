@@ -3,9 +3,8 @@
 
 /// A color with sRGB components and straight alpha, each in `0.0..=1.0`.
 ///
-/// Ported from the JavaFX `Paint` values held by `RenderingAttributes`, which
-/// were likewise sRGB. Bevy renders in linear space, so `squiggle-app`
-/// converts on the way to the GPU.
+/// Bevy renders in linear space, so `squiggle-app` converts on the way to the
+/// GPU.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Rgba {
@@ -19,7 +18,7 @@ impl Rgba {
     pub const WHITE: Self = Self::new(1.0, 1.0, 1.0);
     pub const BLACK: Self = Self::new(0.0, 0.0, 0.0);
     pub const CYAN: Self = Self::new(0.0, 1.0, 1.0);
-    /// JavaFX `Color.GOLD`, used for the cursor crosshair.
+    /// Gold, used for the cursor crosshair.
     pub const GOLD: Self = Self::new(1.0, 0.843_137_3, 0.0);
 
     pub const fn new(red: f32, green: f32, blue: f32) -> Self {
