@@ -7,6 +7,7 @@
 mod demo;
 mod plot;
 mod classify_ui;
+mod layout;
 mod live;
 mod live_ui;
 mod sync_ui;
@@ -79,6 +80,7 @@ fn main() -> AppExit {
         .add_plugins(showcase::ShowcasePlugin)
         .insert_resource(options)
         .add_plugins(tour::TourPlugin)
+        .add_plugins(layout::LayoutPlugin)
         .add_systems(Startup, demo::seed)
         .add_systems(Update, demo::screenshot)
         .run()

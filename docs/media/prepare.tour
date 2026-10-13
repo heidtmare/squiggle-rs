@@ -2,7 +2,8 @@
 # on. Run from the repository root; see record.sh.
 
 # Training catalogue: detect, classify, accept everything, export.
-click "Demo"
+click "File"
+click "New from Demo…"
 click "Synthetic training catalogue"
 wait 4
 click "Events"
@@ -36,7 +37,8 @@ wait 4
 click "Close window"
 
 # Event families, unlabelled, for clustering.
-click "Demo"
+click "File"
+click "New from Demo…"
 click "Synthetic event families"
 click "Discard"
 wait 4

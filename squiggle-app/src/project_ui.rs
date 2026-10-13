@@ -43,18 +43,47 @@ pub struct ProjectAccess<'w> {
     pub requests: MessageWriter<'w, WorkspaceRequest>,
 }
 
-pub fn file_menu(ui: &mut egui::Ui, access: &mut ProjectAccess) {
-    let mut request = |ui: &mut egui::Ui, label: &str, request: WorkspaceRequest| {
-        if ui.button(label).clicked() {
-            access.requests.write(request);
+/// A File menu entry with a shortcut: the keys, its label, what it asks for.
+pub type FileShortcut = (egui::KeyboardShortcut, &'static str, fn() -> WorkspaceRequest);
+
+/// The File menu's shortcuts.
+pub fn file_shortcuts() -> [FileShortcut; 5] {
+    use egui::{Key, KeyboardShortcut, Modifiers};
+    let command = |key| KeyboardShortcut::new(Modifiers::COMMAND, key);
+    [
+        (command(Key::N), "New Project", || WorkspaceRequest::New),
+        (command(Key::O), "Open Project…", || WorkspaceRequest::OpenDialog),
+        (KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::S), "Save Project As…", || WorkspaceRequest::SaveAsDialog),
+        (command(Key::I), "Import Waveforms…", || WorkspaceRequest::ImportDialog),
+        (command(Key::Q), "Quit", || WorkspaceRequest::Quit),
+    ]
+}
+
+/// Carries out a File menu shortcut that was pressed.
+pub fn file_keys(ctx: &egui::Context, access: &mut ProjectAccess) {
+    for (shortcut, _, request) in file_shortcuts() {
+        if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
+            access.requests.write(request());
+        }
+    }
+}
+
+/// The File menu; `demos_open` opens the demo picker.
+pub fn file_menu(ui: &mut egui::Ui, access: &mut ProjectAccess, demos_open: &mut bool) {
+    for (shortcut, label, request) in file_shortcuts() {
+        if matches!(request(), WorkspaceRequest::ImportDialog | WorkspaceRequest::Quit) {
+            ui.separator();
+        }
+        let button = egui::Button::new(label).shortcut_text(ui.ctx().format_shortcut(&shortcut));
+        if ui.add(button).clicked() {
+            access.requests.write(request());
             ui.close();
         }
-    };
-    request(ui, "New Project", WorkspaceRequest::New);
-    request(ui, "Open Project…", WorkspaceRequest::OpenDialog);
-    request(ui, "Save Project As…", WorkspaceRequest::SaveAsDialog);
-    ui.separator();
-    request(ui, "Import Waveforms…", WorkspaceRequest::ImportDialog);
+        if matches!(request(), WorkspaceRequest::New) && ui.button("New from Demo…").clicked() {
+            *demos_open = true;
+            ui.close();
+        }
+    }
 }
 
 pub fn project_menu(ui: &mut egui::Ui, access: &mut ProjectAccess) {
