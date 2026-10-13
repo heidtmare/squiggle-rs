@@ -168,6 +168,15 @@ pub struct ProcessWindows {
     results: Option<AlignResults>,
 }
 
+impl ProcessWindows {
+    /// Adds the work running in the background, for the status bar.
+    pub fn busy(&self, out: &mut Vec<&'static str>) {
+        if self.task.is_some() {
+            out.push("Measuring delays");
+        }
+    }
+}
+
 pub fn process_menu(ui: &mut egui::Ui, windows: &mut ProcessWindows, view: &mut TrackView) {
     if ui.button("Filter and detrend…").on_hover_text("Preprocess the selected tracks").clicked() {
         windows.processing_open = true;

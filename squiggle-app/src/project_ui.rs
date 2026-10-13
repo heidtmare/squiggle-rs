@@ -1,4 +1,4 @@
-//! Project windows: import, sensors, phenomenology registry, errors.
+//! Project windows: import, sensors, phenomenology registry.
 
 use std::collections::HashMap;
 
@@ -83,7 +83,6 @@ pub fn windows(
     phenomenologies_window(&ctx, &workspace, &mut windows);
     editor_window(&ctx, &mut workspace, &mut windows);
     discard_window(&ctx, &mut workspace, &mut requests);
-    error_window(&ctx, &mut workspace);
     Ok(())
 }
 
@@ -659,19 +658,6 @@ fn discard_window(ctx: &egui::Context, workspace: &mut Workspace, requests: &mut
         }
         Some(false) => workspace.confirm_discard = None,
         None => {}
-    }
-}
-
-fn error_window(ctx: &egui::Context, workspace: &mut Workspace) {
-    let Some(message) = &workspace.error else {
-        return;
-    };
-    let mut open = true;
-    theme::dialog(ctx, "Project Error").open(&mut open).show(ctx, |ui| {
-        ui.label(message);
-    });
-    if !open {
-        workspace.error = None;
     }
 }
 

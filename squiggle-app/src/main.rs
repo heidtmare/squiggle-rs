@@ -19,6 +19,7 @@ mod locate_ui;
 mod process_ui;
 mod project_ui;
 mod showcase;
+mod status;
 mod strips;
 mod synthetic;
 mod tour;

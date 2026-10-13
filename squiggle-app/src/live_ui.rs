@@ -84,6 +84,18 @@ pub struct LiveState {
     pending_connect: Option<String>,
 }
 
+impl LiveState {
+    /// The feed's state for the status bar, and whether it is connected.
+    pub fn summary(&mut self) -> Option<(String, bool)> {
+        let session = self.session.as_mut()?.get_mut().unwrap_or_else(|p| p.into_inner());
+        Some(if session.connected {
+            (format!("Live · {}", session.endpoint), true)
+        } else {
+            (format!("Connecting to {}…", session.endpoint), false)
+        })
+    }
+}
+
 impl Default for LiveState {
     fn default() -> Self {
         Self {

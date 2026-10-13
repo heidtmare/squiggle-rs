@@ -97,7 +97,7 @@ pub struct Workspace {
     pub analyst: Analyst,
     pub path: Option<PathBuf>,
     pub samples: HashMap<Id, SampleState>,
-    /// Shown until dismissed.
+    /// The last failure, until the chrome posts it as a notice.
     pub error: Option<String>,
     /// Held while the analyst decides whether to discard an unsaved project.
     pub confirm_discard: Option<WorkspaceRequest>,
@@ -171,7 +171,7 @@ impl Workspace {
         Ok(())
     }
 
-    /// Commits, routing failure to the error window.
+    /// Commits, routing failure to an error notice.
     pub fn commit_or_report(&mut self, change: Change) -> bool {
         match self.commit(change) {
             Ok(()) => true,
@@ -201,7 +201,7 @@ impl Workspace {
         Ok(())
     }
 
-    /// [`Self::execute`], routing failure to the error window.
+    /// [`Self::execute`], routing failure to an error notice.
     pub fn execute_or_report(&mut self, label: impl Into<String>, changes: Vec<Change>) -> bool {
         match self.execute(label, changes) {
             Ok(()) => true,
@@ -218,6 +218,11 @@ impl Workspace {
 
     pub fn redo_label(&self) -> Option<&str> {
         self.redo.last().map(|c| c.label.as_str())
+    }
+
+    /// How many commands can be undone and redone.
+    pub fn history_depth(&self) -> (usize, usize) {
+        (self.undo.len(), self.redo.len())
     }
 
     pub fn undo(&mut self) {

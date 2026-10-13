@@ -451,6 +451,15 @@ pub struct EventWindows {
     merge: Vec<Id>,
 }
 
+impl EventWindows {
+    /// Adds the work running in the background, for the status bar.
+    pub fn busy(&self, out: &mut Vec<&'static str>) {
+        if self.task.is_some() {
+            out.push("Detecting events");
+        }
+    }
+}
+
 impl Default for EventWindows {
     fn default() -> Self {
         Self {

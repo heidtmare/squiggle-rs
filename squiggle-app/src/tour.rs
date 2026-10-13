@@ -913,6 +913,7 @@ fn parse_key(word: &str) -> Result<(KeyCode, Key), String> {
         "Right" => named(KeyCode::ArrowRight, Key::ArrowRight),
         "[" => Ok((KeyCode::BracketLeft, Key::Character("[".into()))),
         "]" => Ok((KeyCode::BracketRight, Key::Character("]".into()))),
+        "?" => Ok((KeyCode::Slash, Key::Character("?".into()))),
         w if w.len() == 1 => {
             let c = w.chars().next().unwrap();
             let code = match c.to_ascii_uppercase() {

@@ -214,6 +214,28 @@ pub struct SyncState {
     dialog: Option<(Id, Task<Option<PathBuf>>)>,
 }
 
+impl SyncState {
+    /// Adds the work running in the background, for the status bar.
+    pub fn busy(&self, out: &mut Vec<&'static str>) {
+        if self.job.is_some() {
+            out.push("Syncing");
+        }
+    }
+
+    /// The shared project's state for the status bar, and whether all is well.
+    pub fn summary(workspace: &Workspace) -> Option<(String, bool)> {
+        workspace.remote()?;
+        let conflicts = workspace.conflicts.len();
+        if conflicts > 0 {
+            return Some((format!("Shared · {conflicts} conflict{}", if conflicts == 1 { "" } else { "s" }), false));
+        }
+        Some(match workspace.pending().len() {
+            0 => ("Shared · up to date".to_string(), true),
+            n => (format!("Shared · {n} to send"), true),
+        })
+    }
+}
+
 impl Default for SyncState {
     fn default() -> Self {
         Self {

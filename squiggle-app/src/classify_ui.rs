@@ -403,6 +403,18 @@ pub struct ClassifyWindows {
     exported: Option<Result<(PathBuf, Manifest), String>>,
 }
 
+impl ClassifyWindows {
+    /// Adds the work running in the background, for the status bar.
+    pub fn busy(&self, out: &mut Vec<&'static str>) {
+        if self.task.is_some() {
+            out.push("Classifying");
+        }
+        if self.export.is_some() {
+            out.push("Exporting dataset");
+        }
+    }
+}
+
 pub fn classify_menu(ui: &mut egui::Ui, windows: &mut ClassifyWindows) {
     for (label, tip, open) in [
         ("Classify…", "Features and the rules classifier on every event", &mut windows.classify_open),

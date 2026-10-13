@@ -103,6 +103,15 @@ pub struct ScatterWindows {
     lasso: Vec<[f64; 2]>,
 }
 
+impl ScatterWindows {
+    /// Adds the work running in the background, for the status bar.
+    pub fn busy(&self, out: &mut Vec<&'static str>) {
+        if self.task.is_some() {
+            out.push("Computing features");
+        }
+    }
+}
+
 impl Default for ScatterWindows {
     fn default() -> Self {
         let index = |name: &str| EVENT_FEATURES.iter().position(|n| *n == name).unwrap_or(0);

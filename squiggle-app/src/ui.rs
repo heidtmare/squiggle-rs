@@ -29,8 +29,9 @@ use crate::scatter_ui::{self, ScatterWindows};
 use crate::templates_ui::{self, TemplateWindows};
 use crate::process_ui::{self, ProcessWindows};
 use crate::project_ui::{self, ProjectAccess, ProjectWindows};
-use crate::workspace::{SyntheticEvent, WorkspaceRequest};
+use crate::workspace::{SampleState, SyntheticEvent, WorkspaceRequest};
 use crate::showcase::{LoadScene, Scene, Showcase};
+use crate::status::{self, Readout, Status};
 use crate::theme;
 use crate::tracks::{self, RowOrder, Track, TrackView};
 
@@ -46,6 +47,8 @@ pub struct UiPlugin;
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Chrome>()
+            .init_resource::<Status>()
+            .add_systems(Update, status::track_drags)
             .init_resource::<ProjectWindows>()
             .init_resource::<ProcessWindows>()
             .init_resource::<LocateWindows>()
@@ -115,9 +118,10 @@ pub struct TrackAccess<'w, 's> {
 pub struct Chrome {
     pub sidebar_open: bool,
     pub about_open: bool,
+    pub shortcuts_open: bool,
     pub transform_settings_open: bool,
     pub transforms: TransformSettings,
-    /// Why the last transform failed, until dismissed.
+    /// Why the last transform failed, until posted as a notice.
     pub transform_error: Option<String>,
 }
 
@@ -193,7 +197,7 @@ fn setup(mut commands: Commands, mut egui_settings: ResMut<EguiGlobalSettings>) 
 }
 
 /// Draws the chrome and hands the space left over to the plot camera.
-// A Bevy system declares everything it touches in its signature; twelve is
+// A Bevy system declares everything it touches in its signature; thirteen is
 // what drawing the whole chrome needs.
 #[allow(clippy::too_many_arguments)]
 fn chrome(
@@ -208,6 +212,7 @@ fn chrome(
     mut commands: PlotCommands,
     mut project: ProjectAccess,
     mut tracks: TrackAccess,
+    mut status: ResMut<Status>,
     mut themed: Local<bool>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?.clone();
@@ -216,14 +221,27 @@ fn chrome(
         *themed = true;
     }
 
-    // Undo and redo, unless a text field has the keyboard.
+    // Undo, redo and the shortcuts sheet, unless a text field has the keyboard.
     if !ctx.egui_wants_keyboard_input() {
         if ctx.input_mut(|i| i.consume_shortcut(&REDO)) {
             project.workspace.redo();
         } else if ctx.input_mut(|i| i.consume_shortcut(&UNDO)) {
             project.workspace.undo();
         }
+        if ctx.input(|i| i.key_pressed(egui::Key::Questionmark) || i.key_pressed(egui::Key::F1)) {
+            chrome.shortcuts_open = !chrome.shortcuts_open;
+        }
     }
+
+    // Failures become notices; edits, undos and redos show in the status bar.
+    if let Some(error) = project.workspace.error.take() {
+        status.error("Something went wrong", error);
+    }
+    if let Some(error) = chrome.transform_error.take() {
+        status.error("Transform failed", error);
+    }
+    let keys = (ctx.format_shortcut(&UNDO), ctx.format_shortcut(&REDO));
+    status.observe_history(&project.workspace, (&keys.0, &keys.1), ctx.input(|i| i.time));
 
     // Panels are laid out inside a background Ui covering the whole viewport;
     // whatever rectangle survives is where the plot goes.
@@ -242,6 +260,15 @@ fn chrome(
             let unsaved = project.workspace.is_unsaved();
             toolbar(ui, &mut plot, &squiggles, &options, &mut commands, &mut tracks, unsaved);
         })
+        .response
+        .rect
+        .height();
+
+    let readout = readout(&plot, &squiggles, &mut project, &mut tracks);
+    status.observe_busy(&readout.busy, ctx.input(|i| i.time));
+    let bottom = egui::Panel::bottom("squiggle_status")
+        .frame(egui::Frame::side_top_panel(root.style()).inner_margin(egui::Margin::symmetric(8, 3)))
+        .show(&mut root, |ui| status::bar(ui, &status, readout))
         .response
         .rect
         .height();
@@ -282,13 +309,114 @@ fn chrome(
     };
 
     about_window(&ctx, &mut chrome);
+    shortcuts_window(&ctx, &mut chrome);
     transform_window(&ctx, &mut chrome);
-    transform_error_window(&ctx, &mut chrome);
 
-    hand_viewport_to_plot(&window, &mut camera, &mut plot, left, right, top);
-    theme::set_plot_rect(&ctx, egui::Rect::from_min_size(plot.origin.to_array().into(), egui::vec2(plot.view.width as f32, plot.view.height as f32)));
+    hand_viewport_to_plot(&window, &mut camera, &mut plot, left, right, top, bottom);
+    let plot_rect = egui::Rect::from_min_size(plot.origin.to_array().into(), egui::vec2(plot.view.width as f32, plot.view.height as f32));
+    theme::set_plot_rect(&ctx, plot_rect);
+
+    if project.workspace.project.traces().is_empty() && squiggles.is_empty() && showcase.current.is_none() {
+        empty_state(&ctx, plot_rect, &mut project, &mut tracks);
+    }
+    status::notices(&ctx, &mut status, plot_rect);
+    if status.dragging {
+        status::drop_target(&ctx, plot_rect);
+    }
     Ok(())
 }
+
+/// What the status bar reports this frame.
+fn readout(
+    plot: &Plot,
+    squiggles: &Query<(Entity, &mut SquiggleModel)>,
+    project: &mut ProjectAccess,
+    tracks: &mut TrackAccess,
+) -> Readout {
+    let mut busy = Vec::new();
+    tracks.process.busy(&mut busy);
+    tracks.locate.busy(&mut busy);
+    tracks.events.busy(&mut busy);
+    tracks.classify.busy(&mut busy);
+    tracks.scatter.busy(&mut busy);
+    tracks.sync.busy(&mut busy);
+    if project.workspace.samples.values().any(|s| matches!(s, SampleState::Loading)) {
+        busy.push("Loading samples");
+    }
+
+    let plural = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
+    let (cursor, selection) = match *tracks.mode {
+        PlotMode::Tracks => {
+            let total = tracks.tracks.iter().count();
+            let selected = tracks.tracks.iter().filter(|t| t.selected).count();
+            let selection = match (total, selected) {
+                (0, _) => None,
+                (_, 0) => Some(plural(total, "track")),
+                _ => Some(format!("{selected} of {} selected", plural(total, "track"))),
+            };
+            (tracks.view.hover.clone(), selection)
+        }
+        PlotMode::Overlay => {
+            let cursor = plot.cursor.filter(|c| plot.plot_area_contains(*c)).map(|c| {
+                let at = plot.view.screen_to_cart(c);
+                format!("x {}  y {}", short(at.x), short(at.y))
+            });
+            let total = squiggles.iter().count();
+            let selected = squiggles.iter().filter(|(_, m)| m.selected).count();
+            let selection = match (total, selected) {
+                (0, _) => None,
+                (_, 0) => Some(plural(total, "squiggle")),
+                _ => Some(format!("{selected} of {} selected", plural(total, "squiggle"))),
+            };
+            (cursor, selection)
+        }
+    };
+
+    Readout {
+        busy,
+        cursor,
+        selection,
+        live: tracks.live.summary(),
+        sync: SyncState::summary(&project.workspace),
+    }
+}
+
+/// A number short enough for the status bar.
+fn short(value: f64) -> String {
+    if value != 0.0 && !(1e-3..1e5).contains(&value.abs()) { format!("{value:.3e}") } else { format!("{value:.4}") }
+}
+
+/// What to do with an empty project, over the empty plot.
+fn empty_state(ctx: &egui::Context, plot: egui::Rect, project: &mut ProjectAccess, tracks: &mut TrackAccess) {
+    egui::Area::new("squiggle_empty".into())
+        .order(egui::Order::Background)
+        .pivot(egui::Align2::CENTER_CENTER)
+        .fixed_pos(plot.center())
+        .show(ctx, |ui| {
+            egui::Frame::window(ui.style()).inner_margin(20).show(ui, |ui| {
+                ui.set_width(340.0);
+                ui.vertical_centered(|ui| {
+                    ui.heading("No traces yet");
+                    ui.add_space(4.0);
+                    ui.weak("Drop waveform files or a project on the window, or:");
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        let width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+                        let size = egui::vec2(width, 26.0);
+                        if ui.add_sized(size, theme::primary("Import Waveforms…")).clicked() {
+                            project.requests.write(WorkspaceRequest::ImportDialog);
+                        }
+                        if ui.add_sized(size, egui::Button::new("Open Project…")).clicked() {
+                            project.requests.write(WorkspaceRequest::OpenDialog);
+                        }
+                    });
+                    ui.add_space(6.0);
+                    ui.menu_button("Start from a demo project ▾", |ui| demo_projects(ui, project, tracks));
+                });
+            });
+        });
+}
+
 
 fn menu_bar(
     ui: &mut egui::Ui,
@@ -370,62 +498,7 @@ fn menu_bar(
             transform_menu(ui, chrome, sources, commands, &project.workspace.project);
         });
         ui.menu_button("Demo", |ui| {
-            if ui
-                .button("Synthetic event (alignment)")
-                .on_hover_text("A new project: seven sensors recording one event with known delays")
-                .clicked()
-            {
-                project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Alignment));
-                ui.close();
-            }
-            if ui
-                .button("Synthetic located event")
-                .on_hover_text("A new project: EMP, seismic and infrasound sensors at known positions recording one explosion")
-                .clicked()
-            {
-                project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Located));
-                ui.close();
-            }
-            if ui
-                .button("Synthetic swarm")
-                .on_hover_text("A new project: two minutes on eight seismic stations with six events and glitches")
-                .clicked()
-            {
-                project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Swarm));
-                ui.close();
-            }
-            if ui
-                .button("Synthetic earthquakes and explosions")
-                .on_hover_text("A new project: seven minutes of five earthquakes and five explosions on seismic and infrasound sensors")
-                .clicked()
-            {
-                project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Mixed));
-                ui.close();
-            }
-            if ui
-                .button("Synthetic training catalogue")
-                .on_hover_text("A new project: 27 minutes of 40 varied earthquakes and explosions on the same sensors, to label, export and train on")
-                .clicked()
-            {
-                project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Catalogue));
-                ui.close();
-            }
-            if ui
-                .button("Synthetic event families")
-                .on_hover_text("A new project: 16 minutes of repeats from two quarries and two earthquake swarms, one weak repeat in each, for clustering, templates and the matched filter")
-                .clicked()
-            {
-                project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Families));
-                ui.close();
-            }
-            if ui
-                .button("Live replay of event families")
-                .on_hover_text(format!("A new project fed live, at ×{}, by a local replay of the event families: recorded, plotted and detected as it arrives", live_ui::DEMO_SPEED))
-                .clicked()
-            {
-                live_ui::request_demo(&mut tracks.live, &mut project.requests);
-                ui.close();
-            }
+            demo_projects(ui, project, tracks);
             ui.separator();
             for scene in Scene::ALL {
                 if ui
@@ -439,12 +512,76 @@ fn menu_bar(
             }
         });
         ui.menu_button("Help", |ui| {
+            if ui.add(egui::Button::new("Keyboard Shortcuts").shortcut_text("?")).clicked() {
+                chrome.shortcuts_open = true;
+                ui.close();
+            }
             if ui.button("About").clicked() {
                 chrome.about_open = true;
                 ui.close();
             }
         });
     });
+}
+
+/// The demo projects: each replaces the open project.
+fn demo_projects(ui: &mut egui::Ui, project: &mut ProjectAccess, tracks: &mut TrackAccess) {
+    if ui
+        .button("Synthetic event (alignment)")
+        .on_hover_text("A new project: seven sensors recording one event with known delays")
+        .clicked()
+    {
+        project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Alignment));
+        ui.close();
+    }
+    if ui
+        .button("Synthetic located event")
+        .on_hover_text("A new project: EMP, seismic and infrasound sensors at known positions recording one explosion")
+        .clicked()
+    {
+        project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Located));
+        ui.close();
+    }
+    if ui
+        .button("Synthetic swarm")
+        .on_hover_text("A new project: two minutes on eight seismic stations with six events and glitches")
+        .clicked()
+    {
+        project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Swarm));
+        ui.close();
+    }
+    if ui
+        .button("Synthetic earthquakes and explosions")
+        .on_hover_text("A new project: seven minutes of five earthquakes and five explosions on seismic and infrasound sensors")
+        .clicked()
+    {
+        project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Mixed));
+        ui.close();
+    }
+    if ui
+        .button("Synthetic training catalogue")
+        .on_hover_text("A new project: 27 minutes of 40 varied earthquakes and explosions on the same sensors, to label, export and train on")
+        .clicked()
+    {
+        project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Catalogue));
+        ui.close();
+    }
+    if ui
+        .button("Synthetic event families")
+        .on_hover_text("A new project: 16 minutes of repeats from two quarries and two earthquake swarms, one weak repeat in each, for clustering, templates and the matched filter")
+        .clicked()
+    {
+        project.requests.write(WorkspaceRequest::Synthetic(SyntheticEvent::Families));
+        ui.close();
+    }
+    if ui
+        .button("Live replay of event families")
+        .on_hover_text(format!("A new project fed live, at ×{}, by a local replay of the event families: recorded, plotted and detected as it arrives", live_ui::DEMO_SPEED))
+        .clicked()
+    {
+        live_ui::request_demo(&mut tracks.live, &mut project.requests);
+        ui.close();
+    }
 }
 
 /// What a transform runs on: selected squiggles in overlay mode, the visible
@@ -642,22 +779,6 @@ fn transform_window(ctx: &egui::Context, chrome: &mut Chrome) {
         });
 }
 
-fn transform_error_window(ctx: &egui::Context, chrome: &mut Chrome) {
-    let Some(message) = &chrome.transform_error else {
-        return;
-    };
-
-    let mut open = true;
-    theme::dialog(ctx, "Transform Failed")
-        .open(&mut open)
-        .show(ctx, |ui| {
-            ui.label(message);
-        });
-    if !open {
-        chrome.transform_error = None;
-    }
-}
-
 /// A drop-down over a fixed set of values.
 fn choice<T: Copy + PartialEq>(
     ui: &mut egui::Ui,
@@ -838,24 +959,91 @@ fn about_window(ctx: &egui::Context, chrome: &mut Chrome) {
     theme::dialog(ctx, "About Squiggle")
         .open(&mut chrome.about_open)
         .show(ctx, |ui| {
+            ui.set_max_width(520.0);
             ui.label("Squiggle — a waveform plot.");
             ui.label("A Rust and Bevy port of the original JavaFX application.");
             ui.separator();
-            ui.strong("Tracks");
-            ui.label("Scroll to zoom time, drag to pan time and rows, pinch or Control-scroll to scale amplitude.");
-            ui.label("Click a row to select it; right-click for display, y scale, I/Q component, reference and offset lock. Double-click to fit.");
-            ui.label("Shift+drag a row to shift it in time (snaps to moveout from the saved origin, to the reference's picks and to correlation peaks; Alt disables). Arrow keys nudge selected rows one sample, ten with Shift.");
-            ui.label("Over a row, P places a first-phase pick at the cursor, S an S pick; Delete removes the nearest pick.");
-            ui.strong("Overlay");
-            ui.label("Drag to pan. Scroll to zoom — hold Alt to keep the x scale, Control to keep the y scale.");
-            ui.label("Click a squiggle to select it and show its samples.");
-            ui.separator();
             ui.label("Process ▸ Filter and detrend preprocesses selected tracks; Process ▸ Align measures and applies delays.");
             ui.label("Process ▸ Pick finds onsets; Process ▸ Locate fits source position and origin time, and removes moveout.");
-            ui.label("Events ▸ Detect finds and associates events; Events ▸ Catalogue reviews them. ⌘/Ctrl+drag makes an event; drag its edges to resize; right-click to split. While reviewing: ] / [ next and previous, A accept, R reject, 1–9 label, Esc close.");
+            ui.label("Events ▸ Detect finds and associates events; Events ▸ Catalogue reviews them.");
             ui.label("Events ▸ Classify runs features and the rules classifier; Features shows the reviewed event's evidence; Labels edits the taxonomy; Export dataset writes Parquet for training; Models imports packages from squiggle-train, whose predictions Classify then records.");
-            ui.label("Edits to processing, offsets, picks, sensor locations, origins and events undo with ⌘Z / Ctrl+Z and redo with ⇧⌘Z.");
+            ui.label("Edits to processing, offsets, picks, sensor locations, origins and events can be undone.");
             ui.label("Transform turns the selected squiggles, or the visible part of selected tracks, into spectra or wavelet levels.");
+            ui.separator();
+            ui.weak("Help ▸ Keyboard Shortcuts (?) lists every key and gesture.");
+        });
+}
+
+/// Every key and gesture, by where it works.
+fn shortcuts_window(ctx: &egui::Context, chrome: &mut Chrome) {
+    if !chrome.shortcuts_open {
+        return;
+    }
+
+    let mac = ctx.os() == egui::os::OperatingSystem::Mac;
+    let (command, control, alt) = if mac { ("⌘", "⌃", "⌥") } else { ("Ctrl+", "Ctrl+", "Alt+") };
+    let sections: [(&str, Vec<(String, &str)>); 4] = [
+        ("General", vec![
+            (ctx.format_shortcut(&UNDO), "Undo"),
+            (ctx.format_shortcut(&REDO), "Redo"),
+            ("?".into(), "This sheet"),
+            ("Esc".into(), "Close a menu"),
+        ]),
+        ("Tracks", vec![
+            ("Click".into(), "Select a row"),
+            ("Right-click, ⋯".into(), "Row display, y scale, reference, lock"),
+            ("Double-click".into(), "Fit every track"),
+            ("Scroll".into(), "Zoom time (over labels: scroll rows)"),
+            ("Drag".into(), "Pan time and rows"),
+            (format!("Pinch, {command}scroll"), "Scale amplitude"),
+            ("⇧ drag".into(), "Shift a row in time, snapping"),
+            (format!("⇧{alt}drag"), "Shift without snapping"),
+            ("← →".into(), "Nudge selected rows a sample"),
+            ("⇧← ⇧→".into(), "Nudge ten samples"),
+            ("P / S".into(), "Pick a first or S phase at the cursor"),
+            ("Delete".into(), "Remove the nearest pick"),
+            (format!("{command}drag"), "Make an event"),
+            ("Drag an edge".into(), "Resize the reviewed event"),
+        ]),
+        ("Reviewing an event", vec![
+            ("] / [".into(), "Next and previous event"),
+            ("A / R".into(), "Accept, reject"),
+            ("1–9".into(), "Label"),
+            ("Right-click".into(), "Split the event"),
+            ("Esc".into(), "Close the review"),
+        ]),
+        ("Overlay", vec![
+            ("Drag".into(), "Pan"),
+            ("Scroll".into(), "Zoom"),
+            (format!("{alt}scroll"), "Zoom y only"),
+            (format!("{control}scroll"), "Zoom x only"),
+            ("Click".into(), "Select a squiggle"),
+        ]),
+    ];
+
+    theme::dialog(ctx, "Keyboard Shortcuts")
+        .open(&mut chrome.shortcuts_open)
+        .show(ctx, |ui| {
+            ui.horizontal_top(|ui| {
+                for column in [&sections[..2], &sections[2..]] {
+                    ui.vertical(|ui| {
+                        for (title, rows) in column {
+                            ui.strong(*title);
+                            egui::Grid::new(title).num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
+                                for (keys, what) in rows {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.label(egui::RichText::new(keys).monospace().background_color(ui.visuals().faint_bg_color));
+                                    });
+                                    ui.label(*what);
+                                    ui.end_row();
+                                }
+                            });
+                            ui.add_space(8.0);
+                        }
+                    });
+                    ui.add_space(16.0);
+                }
+            });
         });
 }
 
@@ -868,10 +1056,11 @@ fn hand_viewport_to_plot(
     left: f32,
     right: f32,
     top: f32,
+    bottom: f32,
 ) {
     let logical_size = Vec2::new(
         (window.width() - left - right).max(0.0),
-        (window.height() - top).max(0.0),
+        (window.height() - top - bottom).max(0.0),
     );
 
     plot.origin = Vec2::new(left, top);

@@ -233,6 +233,18 @@ pub struct LocateWindows {
     fit: Option<FitView>,
 }
 
+impl LocateWindows {
+    /// Adds the work running in the background, for the status bar.
+    pub fn busy(&self, out: &mut Vec<&'static str>) {
+        if self.pick_task.is_some() {
+            out.push("Picking");
+        }
+        if self.locate_task.is_some() {
+            out.push("Locating");
+        }
+    }
+}
+
 impl Default for LocateWindows {
     fn default() -> Self {
         Self {
