@@ -751,7 +751,10 @@ fn encode(frames: Receiver<Frame>, out: PathBuf, written: std::sync::Arc<std::sy
                 .args(["-s", &format!("{}x{}", frame.width, frame.height)])
                 .args(["-r", &FPS.to_string(), "-i", "-"])
                 .args(["-vf", "scale=1920:-2:flags=lanczos,format=yuv420p"])
-                .args(["-c:v", "libx264", "-preset", "slow", "-crf", "23", "-movflags", "+faststart"])
+                // Flat UI, mostly static: long GOPs and animation tuning
+                // halve the size with no visible loss.
+                .args(["-c:v", "libx264", "-preset", "veryslow", "-tune", "animation", "-crf", "28"])
+                .args(["-x264-params", "keyint=900:min-keyint=30", "-movflags", "+faststart"])
                 .arg(&out)
                 .stdin(Stdio::piped())
                 .spawn()
