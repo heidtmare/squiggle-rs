@@ -28,6 +28,7 @@ use squiggle_core::{
 use crate::plot::line::{self, SquiggleLineMaterial};
 use crate::events_ui;
 use crate::strips;
+use crate::theme;
 use crate::plot::{Plot, PlotMode, TRACK_LABEL_WIDTH};
 use crate::workspace::{SampleState, UNASSIGNED_COLOR, Workspace};
 
@@ -53,7 +54,6 @@ pub const NFFT_CHOICES: [usize; 6] = [64, 128, 256, 512, 1024, 2048];
 const GRID_COLOR: egui::Color32 = egui::Color32::from_gray(45);
 const AXIS_COLOR: egui::Color32 = egui::Color32::from_gray(200);
 const CURSOR_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 215, 0);
-const SELECTED_FILL: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 60, 60, 120);
 const SHIFT_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 140, 60);
 const MANUAL_PICK_COLOR: egui::Color32 = egui::Color32::WHITE;
 const AUTO_PICK_COLOR: egui::Color32 = egui::Color32::from_rgb(100, 180, 255);
@@ -179,6 +179,8 @@ pub struct TrackView {
     pub reference: Option<Id>,
     /// Event under review: rows show its offsets, picks and origin, and edits go to it.
     pub event: Option<Id>,
+    /// The pointer's time and row, for the status bar.
+    pub hover: Option<String>,
     /// Row whose context menu is open, and the time it opened at.
     menu_track: Option<Entity>,
     menu_time: f64,
@@ -200,6 +202,7 @@ impl Default for TrackView {
             show_raw: false,
             reference: None,
             event: None,
+            hover: None,
             menu_track: None,
             menu_time: 0.0,
             drag: None,
@@ -773,11 +776,6 @@ fn draw_tracks(
     }
 }
 
-fn color32(color: Rgba) -> egui::Color32 {
-    let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
-    egui::Color32::from_rgb(byte(color.red), byte(color.green), byte(color.blue))
-}
-
 fn manual(workspace: &Workspace) -> Provenance {
     Provenance::Manual { analyst: workspace.analyst.clone(), at: Timestamp::now() }
 }
@@ -989,7 +987,7 @@ pub fn tracks_ui(
         egui::vec2(v.plot_width() as f32, v.plot_height() as f32),
     );
     let width = v.plot_width();
-    let ui = egui::Ui::new(
+    let mut ui = egui::Ui::new(
         ctx.clone(),
         "squiggle_tracks".into(),
         egui::UiBuilder::new().layer_id(egui::LayerId::background()).max_rect(full),
@@ -1000,6 +998,7 @@ pub fn tracks_ui(
 
     let response = ui.interact(area, ui.id().with("area"), egui::Sense::click_and_drag());
     let pointer = response.hover_pos();
+    let hover = ctx.pointer_hover_pos();
 
     // Rows: separators and labels.
     let mut rows: Vec<(Entity, egui::Rangef)> = Vec::new();
@@ -1023,19 +1022,35 @@ pub fn tracks_ui(
         }
         label_response.context_menu(|ui| track_menu(ui, &mut track, &mut view, &mut workspace, width));
 
+        // ⋯ opens the same menu, for those who never try a right-click.
+        let more_popup = ui.id().with(("more", entity));
+        if y.span() >= 22.0 && (hover.is_some_and(|p| label.contains(p)) || egui::Popup::is_id_open(&ctx, more_popup)) {
+            let more = egui::Rect::from_min_size(egui::pos2(label.max.x - 24.0, y.min + 3.0), egui::vec2(20.0, 16.0));
+            let button = ui
+                .scope_builder(egui::UiBuilder::new().max_rect(more).id_salt(("more_button", entity)), |ui| {
+                    ui.add(egui::Button::new("⋯").small())
+                })
+                .inner
+                .on_hover_text("Row display, reference and lock");
+            egui::Popup::menu(&button).id(more_popup).show(|ui| track_menu(ui, &mut track, &mut view, &mut workspace, width));
+        }
+
         let clip = painter.with_clip_rect(label.intersect(area.with_min_x(full.min.x)));
         if track.selected {
-            clip.rect_filled(label, 0.0, SELECTED_FILL);
+            clip.rect_filled(label, 0.0, theme::ACCENT.gamma_multiply(0.25));
+            clip.rect_stroke(label.shrink(0.5), 0.0, egui::Stroke::new(1.0, theme::ACCENT_BRIGHT), egui::StrokeKind::Inside);
+        } else if label_response.hovered() {
+            clip.rect_filled(label, 0.0, egui::Color32::from_white_alpha(8));
         }
-        clip.rect_filled(egui::Rect::from_x_y_ranges(label.min.x + 2.0..=label.min.x + 6.0, y.shrink(3.0)), 1.0, color32(track.color));
+        clip.rect_filled(egui::Rect::from_x_y_ranges(label.min.x + 2.0..=label.min.x + 6.0, y.shrink(3.0)), 1.0, theme::color32(track.color));
         let x = label.min.x + 12.0;
         let mut line_y = y.min + 4.0;
         let title = if view.reference == Some(track.trace) { format!("★ {}", track.code) } else { track.code.clone() };
         clip.text(egui::pos2(x, line_y), egui::Align2::LEFT_TOP, title, egui::FontId::proportional(12.0), egui::Color32::WHITE);
         line_y += 15.0;
         let (phenomenology, color) = match &track.phenomenology {
-            Some(name) => (name.as_str(), color32(track.color)),
-            None => ("unassigned", color32(UNASSIGNED_COLOR)),
+            Some(name) => (name.as_str(), theme::color32(track.color)),
+            None => ("unassigned", theme::color32(UNASSIGNED_COLOR)),
         };
         let mut detail = format!("{phenomenology} · {} Hz", trim_number(track.rate));
         if track.kind == SampleKind::Complex {
@@ -1073,7 +1088,7 @@ pub fn tracks_ui(
                 state.push(format!("⚠ {error}"));
             }
             if !state.is_empty() {
-                let color = if track.preview != 0.0 { SHIFT_COLOR } else { egui::Color32::from_gray(160) };
+                let color = if track.preview != 0.0 { SHIFT_COLOR } else { theme::MUTED };
                 clip.text(egui::pos2(x, line_y), egui::Align2::LEFT_TOP, state.join(" · "), small.clone(), color);
             }
         }
@@ -1170,6 +1185,16 @@ pub fn tracks_ui(
         }
     }
     let row_at = |y: f32| rows.iter().find(|(_, r)| r.contains(y)).map(|(e, _)| *e);
+    view.hover = pointer.filter(|p| area.contains(*p)).map(|p| {
+        let at = view.time.time_at(f64::from(p.x - area.min.x));
+        // As many decimals as a pixel resolves.
+        let decimals = view.time.px_per_s.log10().ceil().clamp(0.0, 6.0) as usize;
+        let time = format!("{at:+.decimals$} s");
+        match row_at(p.y).and_then(|e| tracks.get(e).ok()) {
+            Some((_, track, _)) => format!("{} · {time}", track.code),
+            None => time,
+        }
+    });
     let (shift_held, alt_held) = ctx.input(|i| (i.modifiers.shift, i.modifiers.alt));
 
     // ⌘/Ctrl+drag brushes a new event; dragging the reviewed event's edge moves it.

@@ -27,8 +27,8 @@ use crate::plot::Plot;
 use crate::synthetic;
 use crate::tracks::{Track, TrackView};
 use crate::workspace::{SampleState, Workspace, WorkspaceRequest};
+use crate::theme;
 
-const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 190, 60);
 /// Most feed messages handled per frame.
 const PER_FRAME: usize = 20_000;
 const CHECKPOINT_S: f64 = 10.0;
@@ -82,6 +82,18 @@ pub struct LiveState {
     pending_demo: bool,
     /// Connect once the app is up.
     pending_connect: Option<String>,
+}
+
+impl LiveState {
+    /// The feed's state for the status bar, and whether it is connected.
+    pub fn summary(&mut self) -> Option<(String, bool)> {
+        let session = self.session.as_mut()?.get_mut().unwrap_or_else(|p| p.into_inner());
+        Some(if session.connected {
+            (format!("Live · {}", session.endpoint), true)
+        } else {
+            (format!("Connecting to {}…", session.endpoint), false)
+        })
+    }
 }
 
 impl Default for LiveState {
@@ -456,7 +468,7 @@ pub fn window(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut 
     let mut open = true;
     let mut assign: Vec<Change> = Vec::new();
     let mut stop_now = false;
-    egui::Window::new("Live Feed").open(&mut open).default_width(460.0).show(&ctx, |ui| {
+    theme::tool_window(&ctx, "Live Feed").open(&mut open).default_width(460.0).show(&ctx, |ui| {
         ui.weak(format!(
             "A {} server (e.g. squiggle-stream replaying files). Each channel is recorded to disk as it arrives and checkpointed into the project.",
             squiggle_io::stream::PROTOCOL
@@ -465,7 +477,7 @@ pub fn window(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut 
             ui.label("Server");
             ui.add_enabled(live.session.is_none(), egui::TextEdit::singleline(&mut live.endpoint).desired_width(180.0));
             if live.session.is_none() {
-                if ui.button("Connect").clicked() {
+                if ui.add(theme::primary("Connect")).clicked() {
                     live.status = None;
                     live.session = Some(Mutex::new(start(live.endpoint.clone(), &workspace, live.detect, false, None)));
                 }
@@ -486,7 +498,7 @@ pub fn window(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut 
             let waiting: Vec<&(Id, PhenomenologyId)> =
                 session.suggestions.iter().filter(|(s, _)| workspace.project.sensor(*s).is_some_and(|s| s.assignment.is_none())).collect();
             if !waiting.is_empty() {
-                ui.colored_label(WARN_COLOR, format!("{} new sensors have no phenomenology; they are recorded but not processed.", waiting.len()));
+                ui.colored_label(theme::WARN, format!("{} new sensors have no phenomenology; they are recorded but not processed.", waiting.len()));
                 let names: Vec<String> = waiting
                     .iter()
                     .map(|(s, p)| format!("{} → {p}", workspace.project.sensor(*s).map_or("?", |s| s.code.as_str())))

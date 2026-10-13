@@ -1,4 +1,4 @@
-//! Project windows: import, sensors, phenomenology registry, errors.
+//! Project windows: import, sensors, phenomenology registry.
 
 use std::collections::HashMap;
 
@@ -12,9 +12,8 @@ use squiggle_core::{
 };
 
 use crate::workspace::{ImportQueue, SampleState, UNASSIGNED_COLOR, Workspace, WorkspaceRequest};
+use crate::theme;
 
-const PROBLEM_COLOR: egui::Color32 = egui::Color32::from_rgb(235, 80, 80);
-const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 190, 60);
 
 #[derive(Resource, Default)]
 pub struct ProjectWindows {
@@ -44,18 +43,47 @@ pub struct ProjectAccess<'w> {
     pub requests: MessageWriter<'w, WorkspaceRequest>,
 }
 
-pub fn file_menu(ui: &mut egui::Ui, access: &mut ProjectAccess) {
-    let mut request = |ui: &mut egui::Ui, label: &str, request: WorkspaceRequest| {
-        if ui.button(label).clicked() {
-            access.requests.write(request);
+/// A File menu entry with a shortcut: the keys, its label, what it asks for.
+pub type FileShortcut = (egui::KeyboardShortcut, &'static str, fn() -> WorkspaceRequest);
+
+/// The File menu's shortcuts.
+pub fn file_shortcuts() -> [FileShortcut; 5] {
+    use egui::{Key, KeyboardShortcut, Modifiers};
+    let command = |key| KeyboardShortcut::new(Modifiers::COMMAND, key);
+    [
+        (command(Key::N), "New Project", || WorkspaceRequest::New),
+        (command(Key::O), "Open Project…", || WorkspaceRequest::OpenDialog),
+        (KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::S), "Save Project As…", || WorkspaceRequest::SaveAsDialog),
+        (command(Key::I), "Import Waveforms…", || WorkspaceRequest::ImportDialog),
+        (command(Key::Q), "Quit", || WorkspaceRequest::Quit),
+    ]
+}
+
+/// Carries out a File menu shortcut that was pressed.
+pub fn file_keys(ctx: &egui::Context, access: &mut ProjectAccess) {
+    for (shortcut, _, request) in file_shortcuts() {
+        if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
+            access.requests.write(request());
+        }
+    }
+}
+
+/// The File menu; `demos_open` opens the demo picker.
+pub fn file_menu(ui: &mut egui::Ui, access: &mut ProjectAccess, demos_open: &mut bool) {
+    for (shortcut, label, request) in file_shortcuts() {
+        if matches!(request(), WorkspaceRequest::ImportDialog | WorkspaceRequest::Quit) {
+            ui.separator();
+        }
+        let button = egui::Button::new(label).shortcut_text(ui.ctx().format_shortcut(&shortcut));
+        if ui.add(button).clicked() {
+            access.requests.write(request());
             ui.close();
         }
-    };
-    request(ui, "New Project", WorkspaceRequest::New);
-    request(ui, "Open Project…", WorkspaceRequest::OpenDialog);
-    request(ui, "Save Project As…", WorkspaceRequest::SaveAsDialog);
-    ui.separator();
-    request(ui, "Import Waveforms…", WorkspaceRequest::ImportDialog);
+        if matches!(request(), WorkspaceRequest::New) && ui.button("New from Demo…").clicked() {
+            *demos_open = true;
+            ui.close();
+        }
+    }
 }
 
 pub fn project_menu(ui: &mut egui::Ui, access: &mut ProjectAccess) {
@@ -84,19 +112,13 @@ pub fn windows(
     phenomenologies_window(&ctx, &workspace, &mut windows);
     editor_window(&ctx, &mut workspace, &mut windows);
     discard_window(&ctx, &mut workspace, &mut requests);
-    error_window(&ctx, &mut workspace);
     Ok(())
-}
-
-fn color32(color: Rgba) -> egui::Color32 {
-    let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
-    egui::Color32::from_rgb(byte(color.red), byte(color.green), byte(color.blue))
 }
 
 fn phenomenology_label(project: &Project, id: Option<&PhenomenologyId>) -> egui::RichText {
     match id.and_then(|id| project.phenomenology(id)) {
-        Some(p) => egui::RichText::new(&p.name).color(color32(p.color)),
-        None => egui::RichText::new("⚠ unassigned").color(WARN_COLOR),
+        Some(p) => egui::RichText::new(&p.name).color(theme::color32(p.color)),
+        None => egui::RichText::new("⚠ unassigned").color(theme::WARN),
     }
 }
 
@@ -114,7 +136,7 @@ fn phenomenology_choice(
             ui.selectable_value(value, None, "unassigned");
         }
         for p in project.phenomenologies() {
-            ui.selectable_value(value, Some(p.id.clone()), egui::RichText::new(&p.name).color(color32(p.color)));
+            ui.selectable_value(value, Some(p.id.clone()), egui::RichText::new(&p.name).color(theme::color32(p.color)));
         }
     });
     *value != before
@@ -185,14 +207,14 @@ fn import_window(
 
     let mut open = true;
     let mut confirm = false;
-    egui::Window::new("Import Waveforms")
+    theme::dialog(ctx, "Import Waveforms")
         .default_width(980.0)
-        .collapsible(false)
+        .resizable(true)
         .open(&mut open)
         .show(ctx, |ui| {
             let project = &workspace.project;
             for failure in &queue.failures {
-                ui.label(egui::RichText::new(format!("✘ {failure}")).color(PROBLEM_COLOR));
+                ui.label(egui::RichText::new(format!("✘ {failure}")).color(theme::BAD));
             }
             raw_section(ui, queue, requests);
             if queue.rows.is_empty() {
@@ -237,7 +259,7 @@ fn import_window(
                             ui.add_sized([240.0, height], egui::TextEdit::singleline(&mut row.start))
                                 .on_hover_text(format!("From: {}", row.start_origin));
                             if row.start_origin != "file" && row.start_origin != "entered" {
-                                ui.label(egui::RichText::new("⚠").color(WARN_COLOR))
+                                ui.label(egui::RichText::new("⚠").color(theme::WARN))
                                     .on_hover_text(format!("Not in the file ({}); check before importing", row.start_origin));
                             }
                         });
@@ -267,7 +289,7 @@ fn import_window(
                         }
 
                         match &row.problem {
-                            Some(problem) => ui.label(egui::RichText::new(problem).color(PROBLEM_COLOR)),
+                            Some(problem) => ui.label(egui::RichText::new(problem).color(theme::BAD)),
                             None => ui.label(""),
                         };
                         ui.end_row();
@@ -278,7 +300,7 @@ fn import_window(
             ui.separator();
             ui.horizontal(|ui| {
                 let count = queue.rows.iter().filter(|r| r.include).count();
-                confirm = ui.add_enabled(count > 0, egui::Button::new(format!("Import {count}"))).clicked();
+                confirm = ui.add_enabled(count > 0, theme::primary(format!("Import {count}"))).clicked();
             });
         });
 
@@ -298,7 +320,7 @@ fn sensors_window(ctx: &egui::Context, workspace: &mut Workspace, windows: &mut 
     let mut changes = Vec::new();
     let mut located: Option<(String, Change)> = None;
     let drafts = &mut windows.location_drafts;
-    egui::Window::new("Sensors").default_width(760.0).open(&mut windows.sensors_open).show(ctx, |ui| {
+    theme::tool_window(ctx, "Sensors").default_width(760.0).open(&mut windows.sensors_open).show(ctx, |ui| {
         let project = &workspace.project;
         if project.sensors().is_empty() {
             ui.label("No sensors. Import waveforms with File ▸ Import Waveforms…, or drop files on the window.");
@@ -350,7 +372,7 @@ fn sensors_window(ctx: &egui::Context, workspace: &mut Workspace, windows: &mut 
                     }
                     match (&parsed, sensor.location) {
                         (Err(why), _) if draft.iter().any(|t| !t.trim().is_empty()) => {
-                            ui.colored_label(WARN_COLOR, why);
+                            ui.colored_label(theme::WARN, why);
                         }
                         (_, None) => {
                             ui.weak("none: not used to locate");
@@ -365,8 +387,8 @@ fn sensors_window(ctx: &egui::Context, workspace: &mut Workspace, windows: &mut 
                         let (status, color) = match workspace.samples.get(&trace.id) {
                             Some(SampleState::Loaded(_)) => ("loaded".to_string(), None),
                             Some(SampleState::Loading) => ("loading…".to_string(), None),
-                            Some(SampleState::Failed(error)) => (format!("✘ {error}"), Some(PROBLEM_COLOR)),
-                            None => ("not loaded".to_string(), Some(WARN_COLOR)),
+                            Some(SampleState::Failed(error)) => (format!("✘ {error}"), Some(theme::BAD)),
+                            None => ("not loaded".to_string(), Some(theme::WARN)),
                         };
                         ui.label(format!(
                             "{} · {} Hz · {:.3} s · {}",
@@ -380,7 +402,7 @@ fn sensors_window(ctx: &egui::Context, workspace: &mut Workspace, windows: &mut 
                             Some(color) => status.color(color),
                             None => status.weak(),
                         });
-                        if ui.small_button("✕").on_hover_text("Remove trace from project").clicked() {
+                        if theme::danger(ui, true, egui::Button::new("✕").small()).on_hover_text("Remove trace from project").clicked() {
                             changes.push(Change::RemoveTrace { trace: trace.id });
                         }
                     });
@@ -404,14 +426,14 @@ fn phenomenologies_window(ctx: &egui::Context, workspace: &Workspace, windows: &
     }
 
     let mut edit = None;
-    egui::Window::new("Phenomenologies").default_width(640.0).open(&mut windows.phenomenologies_open).show(ctx, |ui| {
+    theme::tool_window(ctx, "Phenomenologies").default_width(640.0).open(&mut windows.phenomenologies_open).show(ctx, |ui| {
         egui::Grid::new("phenomenologies").striped(true).num_columns(7).show(ui, |ui| {
             for heading in ["Name", "Id", "Quantity", "Samples", "Propagation", "Ver", ""] {
                 ui.strong(heading);
             }
             ui.end_row();
             for p in workspace.project.phenomenologies() {
-                ui.label(egui::RichText::new(&p.name).color(color32(p.color)));
+                ui.label(egui::RichText::new(&p.name).color(theme::color32(p.color)));
                 ui.label(egui::RichText::new(p.id.as_str()).monospace());
                 ui.label(format!("{} ({})", p.quantity, p.units));
                 ui.label(p.sample_kind.label());
@@ -549,7 +571,7 @@ fn editor_window(ctx: &egui::Context, workspace: &mut Workspace, windows: &mut P
     let mut open = true;
     let mut save = false;
     let title = if draft.replaces.is_some() { "Edit Phenomenology" } else { "New Phenomenology" };
-    egui::Window::new(title).collapsible(false).resizable(false).open(&mut open).show(ctx, |ui| {
+    theme::dialog(ctx, title).open(&mut open).show(ctx, |ui| {
         egui::Grid::new("phenomenology_editor").num_columns(2).show(ui, |ui| {
             ui.label("Id");
             ui.add_enabled(draft.replaces.is_none(), egui::TextEdit::singleline(&mut draft.id).hint_text("e.g. hydroacoustic"));
@@ -598,7 +620,7 @@ fn editor_window(ctx: &egui::Context, workspace: &mut Workspace, windows: &mut P
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(name).desired_width(80.0));
                         ui.add(egui::DragValue::new(speed).range(1e-3..=3e8).suffix(" m/s"));
-                        if ui.small_button("✕").clicked() {
+                        if theme::danger(ui, true, egui::Button::new("✕").small()).clicked() {
                             remove = Some(index);
                         }
                     });
@@ -613,13 +635,13 @@ fn editor_window(ctx: &egui::Context, workspace: &mut Workspace, windows: &mut P
         }
 
         if let Some(problem) = &draft.problem {
-            ui.label(egui::RichText::new(problem).color(PROBLEM_COLOR));
+            ui.label(egui::RichText::new(problem).color(theme::BAD));
         }
         ui.separator();
         if let Some(version) = draft.replaces {
             ui.label(egui::RichText::new(format!("Saves as v{}; existing assignments keep v{version}.", version + 1)).weak());
         }
-        save = ui.button("Save").clicked();
+        save = ui.add(theme::primary("Save")).clicked();
     });
 
     if save {
@@ -642,13 +664,13 @@ fn discard_window(ctx: &egui::Context, workspace: &mut Workspace, requests: &mut
     };
 
     let mut decided = None;
-    egui::Window::new("Unsaved Project").collapsible(false).resizable(false).show(ctx, |ui| {
+    theme::dialog(ctx, "Unsaved Project").show(ctx, |ui| {
         ui.label("This project has not been saved. Discard it?");
         ui.horizontal(|ui| {
-            if ui.button("Discard").clicked() {
+            if theme::danger(ui, true, egui::Button::new("Discard")).clicked() {
                 decided = Some(true);
             }
-            if ui.button("Save As…").clicked() {
+            if ui.add(theme::primary("Save As…")).clicked() {
                 decided = Some(false);
                 requests.write(WorkspaceRequest::SaveAsDialog);
             }
@@ -665,19 +687,6 @@ fn discard_window(ctx: &egui::Context, workspace: &mut Workspace, requests: &mut
         }
         Some(false) => workspace.confirm_discard = None,
         None => {}
-    }
-}
-
-fn error_window(ctx: &egui::Context, workspace: &mut Workspace) {
-    let Some(message) = &workspace.error else {
-        return;
-    };
-    let mut open = true;
-    egui::Window::new("Project Error").collapsible(false).resizable(false).open(&mut open).show(ctx, |ui| {
-        ui.label(message);
-    });
-    if !open {
-        workspace.error = None;
     }
 }
 

@@ -22,17 +22,20 @@ wait 0.8
 
 # --- Transforms -------------------------------------------------------------
 caption "Fourier, DFT, FFT, STFT, inverse and wavelet transforms, with self-checking demos"
-click "Demo"
+click "File"
+click "New from Demo…"
 click "Fourier"
 wait 3.5
-click "Demo"
+click "File"
+click "New from Demo…"
 click "Wavelet"
 wait 3.5
 click "Close"
 
 # --- Tracks, spectrograms, filters, alignment --------------------------------
 caption "Stacked multi-sensor tracks share one time axis, whatever their sample rates"
-click "Demo"
+click "File"
+click "New from Demo…"
 click "Synthetic event (alignment)"
 wait 2.5
 scroll 0.55,0.55 4 1
@@ -78,7 +81,8 @@ wait 1.2
 
 # --- Picking and location -----------------------------------------------------
 caption "Picking and location across phenomenologies: EMP, seismic and infrasound"
-click "Demo"
+click "File"
+click "New from Demo…"
 click "Synthetic located event"
 click "Discard"
 wait 2.5
@@ -120,7 +124,8 @@ wait 2.5
 
 # --- Events ---------------------------------------------------------------------
 caption "Streaming detectors on every track; onsets associated across sensors, located and pruned"
-click "Demo"
+click "File"
+click "New from Demo…"
 click "Synthetic swarm"
 click "Discard"
 wait 2.5
@@ -152,7 +157,8 @@ wait 0.5
 
 # --- Classification -------------------------------------------------------------
 caption "Classification: earthquake / explosion discriminants and a transparent rules classifier"
-click "Demo"
+click "File"
+click "New from Demo…"
 click "Synthetic earthquakes and explosions"
 click "Discard"
 wait 2.5
@@ -206,7 +212,8 @@ key Escape
 
 # --- Templates, matched filter, clusters ----------------------------------------
 caption "Templates: save a reviewed event, then a matched filter finds its weak repeats"
-click "Demo"
+click "File"
+click "New from Demo…"
 click "Synthetic event families"
 click "Discard"
 wait 2.5
@@ -267,7 +274,7 @@ click "Close window"
 caption "Shared projects: sync edits through squiggle-server; analyst judgements never silently lost"
 pick "target/showcase/families.squiggle"
 click "File"
-click "Save Project As…"
+click "Save Project As…*"
 wait 1.5
 click "Project"
 click "Shared project…"
@@ -278,7 +285,8 @@ click "Close window"
 
 # --- Live -----------------------------------------------------------------------------
 caption "Live feeds: recorded as they arrive, plotted as they grow, and detected on a sliding window"
-click "Demo"
+click "File"
+click "New from Demo…"
 click "Live replay of event families"
 wait 4
 click "Close window"

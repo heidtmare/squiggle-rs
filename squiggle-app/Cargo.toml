@@ -11,8 +11,13 @@ squiggle-io.workspace = true
 squiggle-models.workspace = true
 bevy.workspace = true
 bevy_egui.workspace = true
+# The same egui as bevy_egui, able to save window positions and panel sizes.
+egui = { version = "0.36", features = ["persistence"] }
 rand = "0.9"
 rfd = "0.17"
+serde.workspace = true
+# egui keeps its memory as RON, whose maps may have keys that are not strings.
+ron = "0.12"
 
 [dev-dependencies]
 squiggle-train.workspace = true

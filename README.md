@@ -118,7 +118,9 @@ already compiles dependencies with optimizations in dev profiles.
 
 The toolbar switches between two views. **Tracks** shows imported traces,
 one row each, on a shared time axis; it opens when traces are loaded.
-**Overlay** shows free squiggles: demos and transform results.
+**Overlay** shows free squiggles: demos and transform results. The view, the
+toolbar toggles, the sidebar and window positions are kept between sessions.
+Press `?` for the keyboard shortcuts.
 
 | Tracks | Control |
 | --- | --- |
@@ -156,11 +158,11 @@ dashed green.
 | Zoom y only | `Alt` + scroll |
 | Zoom x only | `Control` + scroll |
 | Select a squiggle | Click it — its samples appear as dots |
-| Add a demo squiggle | **Add Squiggle** in the toolbar |
+| Add a demo squiggle | **+ Squiggle** in the toolbar |
 | Frame everything | **Fit** in the toolbar |
 | List and delete squiggles | The **Squiggles** sidebar handle on the left |
 | Delete the selection | **Edit ▸ Delete selected** |
-| Transform a squiggle | Select it, then pick from the **Transform** menu |
+| Transform a squiggle | Select it, then pick from **Process ▸ Transform** |
 
 Zoom is multiplicative, so each scroll notch changes the scale by the same
 ratio at every magnification. When a squiggle is selected, sample dots closer
@@ -227,7 +229,7 @@ Sensors…**.
 has quantity, units, sample kind, propagation (constant speed, phases, or
 unknown) and colour. Edits create a new version; assignments record the
 version and the analyst. Sensors without one are plotted grey and refused by
-**Transform**.
+**Process ▸ Transform**.
 
 ## Processing and alignment
 
@@ -264,7 +266,7 @@ physics do not correlate.
 Offsets are per trace and global until events exist; rows are drawn at
 clock-corrected start plus offset.
 
-`--synthetic` (or **Demo ▸ Synthetic event**) writes seven SAC files to the
+`--synthetic` (or the **Synthetic event** demo) writes seven SAC files to the
 temp directory: five seismic stations (40–200 Hz) and two infrasound sensors
 recording one event with known delays under a strong microseism. Align then
 shows a *vs truth* column. Unfiltered, the microseism dominates and rows stay
@@ -324,7 +326,7 @@ ordered by distance, and Shift+drag snaps to them.
 
 Both are undoable, automatic and leave locked offsets alone.
 
-`--located` (or **Demo ▸ Synthetic located event**) writes twelve SAC files
+`--located` (or the **Synthetic located event** demo) writes twelve SAC files
 with station coordinates: three EMP sensors (1 MHz, 20 ms captures), six
 seismic stations (50–200 Hz, P and S) and three infrasound sensors (50 Hz)
 recording a 0.5 km deep explosion. Arrivals follow the built-in speeds. With
@@ -393,7 +395,7 @@ slot is taken). **Queue** lists automatic events, most uncertain first, and
 `]` / `[` follow it. For synthetic data a *vs truth* column shows the nearest
 known event and its class.
 
-`--swarm` (or **Demo ▸ Synthetic swarm**) writes eight seismic stations
+`--swarm` (or the **Synthetic swarm** demo) writes eight seismic stations
 (100 Hz, 130 s) recording six events at 3 km depth, one too weak to detect,
 plus four single-station glitches. With default settings detection finds the
 five detectable events with all eight members each and no false events;
@@ -444,7 +446,7 @@ per member with sensor, phenomenology, onset and member features. The
 manifest records the feature set, taxonomy and its version, class counts and
 file hashes; the Parquet schemas carry the same metadata.
 
-`--mixed` (or **Demo ▸ Synthetic earthquakes and explosions**) writes eight
+`--mixed` (or the **Synthetic earthquakes and explosions** demo) writes eight
 seismic stations (100 Hz) and two infrasound sensors (20 Hz) over 420 s with
 five earthquakes (5–11 km deep, weak low-frequency P with a quadrant
 first-motion pattern, strong S) and five explosions (0.2–0.5 km, strong
@@ -572,7 +574,7 @@ core point within eps. Drag a lasso or click (Shift adds), **Select
 cluster**, then label, accept or reject the selection as one undoable
 command; double-click reviews an event.
 
-`--families` (or **Demo ▸ Synthetic event families**) writes the mixed
+`--families` (or the **Synthetic event families** demo) writes the mixed
 scene's sensors recording six repeats each from two quarries and two
 earthquake swarms (within 100 m, amplitude ×0.7–1.4), each family with one
 weak repeat (quarries ×0.04, swarms ×0.015), and adds a subtype label per
@@ -617,7 +619,7 @@ cargo run -p squiggle-io --release --bin squiggle-stream -- <files…> [--port 1
   events equal those of detecting the whole recording. A trace silent for
   30 s of feed time does not hold events open. Stopping closes the rest.
 
-**Demo ▸ Live replay of event families** (or `--live-demo`) opens a new
+The **Live replay of event families** demo (or `--live-demo`) opens a new
 project, serves the families scene locally at ×10 and connects, assigning
 the suggested phenomenologies; events appear about 15 s (152 s of feed)
 after they occur.
@@ -659,8 +661,8 @@ To try it on one machine: start the server, run the app twice with
 
 ## Transforms
 
-The **Transform** menu turns each selected squiggle into new ones, added to
-the plot in the source's colour. **Transform ▸ Settings…** holds the
+**Process ▸ Transform** turns each selected squiggle into new ones, added to
+the plot in the source's colour. **Process ▸ Transform ▸ Settings…** holds the
 parameters.
 
 | Transform | Result |
@@ -683,8 +685,9 @@ than reconstruct it from magnitudes alone.
 
 ### Demos
 
-The **Demo** menu, or `--demo` at startup, loads a test signal whose transform
-is known in advance. The result is plotted beside the expected answer, and a
+**File ▸ New from Demo…** lists the demo projects (each replaces the open
+one) and the transform scenes. A scene, or `--demo` at startup, loads a test
+signal whose transform is known in advance. The result is plotted beside the expected answer, and a
 side panel lists numerical checks with pass or fail marks: peak heights,
 phase, Parseval, DFT against FFT, exact inverse reconstruction, wavelet bands
 summing to the signal, energy kept by the coefficients, and each feature
@@ -724,7 +727,9 @@ squiggle-app/    the Bevy application
   src/project_ui.rs  import, sensor and phenomenology windows
   assets/shaders/squiggle_line.wgsl   screen-space polyline expansion
   src/plot/      camera, input, meshing, overlay
-  src/ui.rs      menu bar, toolbar, sidebar (egui)
+  src/ui.rs      menu bar, toolbar, sidebar, demo picker (egui)
+  src/status.rs  status bar, notices, empty state, drop target
+  src/layout.rs  layout kept between sessions
   src/showcase.rs  transform demo scenes and their checks
   src/demo.rs      demo squiggle and command-line options
 ```

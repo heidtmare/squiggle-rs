@@ -20,8 +20,8 @@ use squiggle_models::package::{Package, SPEC_FILE};
 
 use crate::demo::DemoOptions;
 use crate::workspace::{Workspace, WorkspaceRequest};
+use crate::theme;
 
-const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 190, 60);
 /// Seconds between automatic syncs.
 const AUTO_S: f64 = 5.0;
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -214,6 +214,28 @@ pub struct SyncState {
     dialog: Option<(Id, Task<Option<PathBuf>>)>,
 }
 
+impl SyncState {
+    /// Adds the work running in the background, for the status bar.
+    pub fn busy(&self, out: &mut Vec<&'static str>) {
+        if self.job.is_some() {
+            out.push("Syncing");
+        }
+    }
+
+    /// The shared project's state for the status bar, and whether all is well.
+    pub fn summary(workspace: &Workspace) -> Option<(String, bool)> {
+        workspace.remote()?;
+        let conflicts = workspace.conflicts.len();
+        if conflicts > 0 {
+            return Some((format!("Shared · {conflicts} conflict{}", if conflicts == 1 { "" } else { "s" }), false));
+        }
+        Some(match workspace.pending().len() {
+            0 => ("Shared · up to date".to_string(), true),
+            n => (format!("Shared · {n} to send"), true),
+        })
+    }
+}
+
 impl Default for SyncState {
     fn default() -> Self {
         Self {
@@ -336,7 +358,7 @@ fn summary(change: &Change, project: &Project) -> String {
 
 fn conflict_ui(ui: &mut egui::Ui, conflict: &Conflict, project: &Project) -> Option<bool> {
     let mut choice = None;
-    ui.colored_label(WARN_COLOR, &conflict.reason);
+    ui.colored_label(theme::WARN, &conflict.reason);
     ui.label(format!("Mine ({}, {}): {}", conflict.mine.analyst, conflict.mine.at, summary(&conflict.mine.change, project)));
     for op in &conflict.theirs {
         ui.label(format!("Theirs ({}, {}): {}", op.analyst, op.at, summary(&op.change, project)));
@@ -361,7 +383,7 @@ pub fn window(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut 
     let mut open = true;
     let mut settled: Option<(usize, bool)> = None;
     let mut unlink = false;
-    egui::Window::new("Shared Project").open(&mut open).default_width(480.0).show(&ctx, |ui| {
+    theme::tool_window(&ctx, "Shared Project").open(&mut open).default_width(480.0).show(&ctx, |ui| {
         let busy = state.job.is_some() || state.dialog.is_some();
         ui.label(format!("Analyst: {}", workspace.analyst)).on_hover_text("Set with --analyst NAME or $SQUIGGLE_ANALYST");
         match workspace.remote().cloned() {
@@ -386,7 +408,7 @@ pub fn window(mut contexts: EguiContexts, mut workspace: ResMut<Workspace>, mut 
                 });
                 ui.horizontal(|ui| {
                     let saved = workspace.cache_dir().is_some();
-                    let button = ui.add_enabled(!busy && saved, egui::Button::new("Share this project"));
+                    let button = ui.add_enabled(!busy && saved, theme::primary("Share this project"));
                     let button = if saved { button } else { button.on_disabled_hover_text("Save the project first") };
                     if button.clicked() {
                         let (endpoint, analyst) = (state.endpoint.clone(), workspace.analyst.clone());

@@ -20,19 +20,8 @@ use crate::models_ui::ModelRegistry;
 use crate::plot::Plot;
 use crate::tracks::{Track, TrackView};
 use crate::workspace::Workspace;
+use crate::theme;
 
-const PALETTE: [egui::Color32; 10] = [
-    egui::Color32::from_rgb(110, 170, 240),
-    egui::Color32::from_rgb(240, 140, 70),
-    egui::Color32::from_rgb(120, 200, 120),
-    egui::Color32::from_rgb(210, 110, 200),
-    egui::Color32::from_rgb(240, 210, 90),
-    egui::Color32::from_rgb(90, 210, 210),
-    egui::Color32::from_rgb(230, 100, 110),
-    egui::Color32::from_rgb(160, 140, 240),
-    egui::Color32::from_rgb(190, 160, 110),
-    egui::Color32::from_rgb(150, 220, 170),
-];
 const NONE_COLOR: egui::Color32 = egui::Color32::from_gray(130);
 
 /// One event's coordinates.
@@ -114,6 +103,15 @@ pub struct ScatterWindows {
     lasso: Vec<[f64; 2]>,
 }
 
+impl ScatterWindows {
+    /// Adds the work running in the background, for the status bar.
+    pub fn busy(&self, out: &mut Vec<&'static str>) {
+        if self.task.is_some() {
+            out.push("Computing features");
+        }
+    }
+}
+
 impl Default for ScatterWindows {
     fn default() -> Self {
         let index = |name: &str| EVENT_FEATURES.iter().position(|n| *n == name).unwrap_or(0);
@@ -140,7 +138,7 @@ pub fn scatter_menu(ui: &mut egui::Ui, windows: &mut ScatterWindows) {
 }
 
 fn palette(i: usize) -> egui::Color32 {
-    PALETTE[i % PALETTE.len()]
+    theme::CATEGORIES[i % theme::CATEGORIES.len()]
 }
 
 /// Index of `key` among the distinct keys seen so far.
@@ -190,7 +188,7 @@ pub fn windows(
     let mut open = true;
     let mut change: Option<(String, Vec<Change>)> = None;
     let mut review: Option<Id> = None;
-    egui::Window::new("Event Scatter").open(&mut open).default_width(620.0).show(&ctx, |ui| {
+    theme::tool_window(&ctx, "Event Scatter").open(&mut open).default_width(620.0).show(&ctx, |ui| {
         let project = &workspace.project;
         let dims: Vec<String> = match &package {
             Some(p) => {
@@ -434,7 +432,7 @@ pub fn windows(
                     let changes: Vec<Change> = ids.iter().filter_map(|id| accept_change(project, *id)).collect();
                     change = Some((format!("Accept {} events", changes.len()), changes));
                 }
-                if ui.button("Reject").clicked() {
+                if theme::danger(ui, true, egui::Button::new("Reject")).clicked() {
                     let changes: Vec<Change> = ids.iter().filter_map(|id| status_change(project, *id, EventStatus::Rejected)).collect();
                     change = Some((format!("Reject {} events", changes.len()), changes));
                 }

@@ -2,7 +2,7 @@
 //! known in advance.
 //!
 //! Each scene builds its test signal, runs it through the same
-//! [`Transform::apply`] the Transform menu uses, and lays the results out on
+//! [`Transform::apply`] Process ▸ Transform uses, and lays the results out on
 //! the plot beside markers for what they ought to be. Alongside the picture it
 //! carries a list of numerical checks, so the claim that the transforms work
 //! does not rest on squinting at curves.
@@ -52,6 +52,14 @@ impl Scene {
         match self {
             Self::Fourier => "Fourier",
             Self::Wavelet => "Wavelet",
+        }
+    }
+
+    /// What the scene shows, in a line.
+    pub fn summary(self) -> &'static str {
+        match self {
+            Self::Fourier => "Three summed sines and their FFT amplitude spectrum",
+            Self::Wavelet => "A swell, two bursts and a click, split into Db4 wavelet bands",
         }
     }
 

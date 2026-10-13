@@ -31,10 +31,8 @@ use crate::templates_ui::template_change;
 use crate::process_ui::config_hash;
 use crate::tracks::{Track, TrackView};
 use crate::workspace::Workspace;
+use crate::theme;
 
-const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 190, 60);
-const EXPLOSIVE_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 140, 70);
-const QUAKE_COLOR: egui::Color32 = egui::Color32::from_rgb(110, 170, 240);
 
 /// Every assigned trace with values, as features need it.
 pub fn trace_data(project: &Project, values: impl Fn(&Trace) -> Option<Vec<f32>>) -> Vec<TraceData> {
@@ -405,6 +403,18 @@ pub struct ClassifyWindows {
     exported: Option<Result<(PathBuf, Manifest), String>>,
 }
 
+impl ClassifyWindows {
+    /// Adds the work running in the background, for the status bar.
+    pub fn busy(&self, out: &mut Vec<&'static str>) {
+        if self.task.is_some() {
+            out.push("Classifying");
+        }
+        if self.export.is_some() {
+            out.push("Exporting dataset");
+        }
+    }
+}
+
 pub fn classify_menu(ui: &mut egui::Ui, windows: &mut ClassifyWindows) {
     for (label, tip, open) in [
         ("Classify…", "Features and the rules classifier on every event", &mut windows.classify_open),
@@ -458,7 +468,7 @@ fn classify_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace
         return;
     }
     let mut open = true;
-    egui::Window::new("Classify Events").open(&mut open).default_width(420.0).show(ctx, |ui| {
+    theme::tool_window(ctx, "Classify Events").open(&mut open).default_width(420.0).show(ctx, |ui| {
         ui.weak("Features from each member's plotted series, then the rules classifier and every enabled model (Events ▸ Models). Each run replaces the events' predictions and never changes their status or label.");
         let s = &mut windows.settings;
         egui::CollapsingHeader::new("Rules").default_open(true).show(ui, |ui| {
@@ -508,7 +518,7 @@ fn classify_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace
         });
         ui.horizontal(|ui| {
             let busy = windows.task.is_some();
-            if ui.add_enabled(n > 0 && !busy, egui::Button::new(format!("Classify {n} events"))).clicked() {
+            if ui.add_enabled(n > 0 && !busy, theme::primary(format!("Classify {n} events"))).clicked() {
                 let values = track_values(tracks);
                 let traces = trace_data(project, |t| values.get(&t.id).cloned());
                 let events = all_events(project, &traces);
@@ -547,7 +557,7 @@ fn classify_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace
         });
         let disagree = disagree.count();
         if disagree > 0 {
-            ui.colored_label(WARN_COLOR, format!("Models disagree on {disagree} events; the review queue ranks them first."));
+            ui.colored_label(theme::WARN, format!("Models disagree on {disagree} events; the review queue ranks them first."));
         }
     });
     windows.classify_open = open;
@@ -563,21 +573,13 @@ fn format_value(value: f64) -> String {
     }
 }
 
-fn label_color(label: &str) -> egui::Color32 {
-    match label {
-        squiggle_core::taxonomy::EXPLOSION => EXPLOSIVE_COLOR,
-        squiggle_core::taxonomy::EARTHQUAKE => QUAKE_COLOR,
-        _ => egui::Color32::from_gray(190),
-    }
-}
-
 /// Probabilities as labelled bars.
 fn probability_bars(ui: &mut egui::Ui, project: &Project, labels: &[(LabelId, f32)]) {
     for (label, p) in labels {
         ui.horizontal(|ui| {
             let name = project.taxonomy().get(label).map_or(label.0.clone(), |l| l.name.clone());
             ui.add_sized([90.0, 16.0], egui::Label::new(name));
-            ui.add(egui::ProgressBar::new(*p).desired_width(160.0).fill(label_color(&label.0).gamma_multiply(0.8)).text(format!("{:.0}%", p * 100.0)));
+            ui.add(egui::ProgressBar::new(*p).desired_width(160.0).fill(theme::label_color(&label.0).gamma_multiply(0.8)).text(format!("{:.0}%", p * 100.0)));
         });
     }
 }
@@ -609,7 +611,7 @@ fn features_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace
     }
     let Some(id) = view.event.filter(|id| workspace.project.event(*id).is_some()) else {
         let mut open = true;
-        egui::Window::new("Event Features").open(&mut open).show(ctx, |ui| {
+        theme::tool_window(ctx, "Event Features").open(&mut open).show(ctx, |ui| {
             ui.label("Review an event (Events ▸ Catalogue) to see its features.");
         });
         windows.features_open = open;
@@ -640,7 +642,7 @@ fn features_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace
     }
     let mut open = true;
     let mut change: Option<(String, Change)> = None;
-    egui::Window::new("Event Features").open(&mut open).default_width(560.0).show(ctx, |ui| {
+    theme::tool_window(ctx, "Event Features").open(&mut open).default_width(560.0).show(ctx, |ui| {
         let project = &workspace.project;
         let event = project.event(id).expect("checked above");
         let Some((.., result)) = &windows.panel else {
@@ -704,7 +706,7 @@ fn features_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace
                             windows.template_name.clear();
                         }
                         None => {
-                            ui.colored_label(WARN_COLOR, "No member windows");
+                            ui.colored_label(theme::WARN, "No member windows");
                         }
                     }
                 }
@@ -721,7 +723,7 @@ fn features_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace
                 ui.horizontal(|ui| {
                     ui.strong(format!("Recorded: {}", prediction.model));
                     if stale {
-                        ui.colored_label(WARN_COLOR, "⚠").on_hover_text("Predicted under an older taxonomy version");
+                        ui.colored_label(theme::WARN, "⚠").on_hover_text("Predicted under an older taxonomy version");
                     }
                 });
                 probability_bars(ui, project, &prediction.labels);
@@ -734,9 +736,9 @@ fn features_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace
             egui::Grid::new("evidence").num_columns(3).striped(true).show(ui, |ui| {
                 for e in &result.verdict.evidence {
                     ui.label(e.reason).on_hover_text(e.feature);
-                    ui.monospace(format_value(e.value));
-                    let color = if e.weight >= 0.0 { EXPLOSIVE_COLOR } else { QUAKE_COLOR };
-                    ui.colored_label(color, format!("{:+.2}", e.weight));
+                    theme::number(ui, format_value(e.value));
+                    let color = if e.weight >= 0.0 { theme::EXPLOSION } else { theme::EARTHQUAKE };
+                    theme::number_colored(ui, format!("{:+.2}", e.weight), color);
                     ui.end_row();
                 }
             });
@@ -747,7 +749,7 @@ fn features_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace
                 for (i, chunk) in EVENT_FEATURES.chunks(2).enumerate() {
                     for (j, name) in chunk.iter().enumerate() {
                         ui.label(*name);
-                        ui.monospace(format_value(result.features.event[2 * i + j]));
+                        theme::number(ui, format_value(result.features.event[2 * i + j]));
                     }
                     ui.end_row();
                 }
@@ -757,9 +759,7 @@ fn features_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace
             egui::ScrollArea::horizontal().show(ui, |ui| {
                 egui::Grid::new("member_features").num_columns(MEMBER_FEATURES.len() + 1).striped(true).show(ui, |ui| {
                     ui.strong("Sensor");
-                    for name in MEMBER_FEATURES {
-                        ui.strong(name);
-                    }
+                    theme::headings(ui, &MEMBER_FEATURES, &MEMBER_FEATURES);
                     ui.end_row();
                     for (m, values) in result.features.members.iter().enumerate() {
                         let code = windows
@@ -769,7 +769,7 @@ fn features_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace
                             .map_or("?", |s| s.code.as_str());
                         ui.label(code);
                         for v in values {
-                            ui.monospace(format_value(*v));
+                            theme::number(ui, format_value(*v));
                         }
                         ui.end_row();
                     }
@@ -790,7 +790,7 @@ fn labels_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace: 
     }
     let mut open = true;
     let mut change: Option<(String, Change)> = None;
-    egui::Window::new("Labels").open(&mut open).default_width(420.0).show(ctx, |ui| {
+    theme::tool_window(ctx, "Labels").open(&mut open).default_width(420.0).show(ctx, |ui| {
         let project = &workspace.project;
         let taxonomy = project.taxonomy();
         ui.weak(format!("Taxonomy version {}. Keys 1–9 label the reviewed event in this order. Rejected events export as \"{NOISE}\".", taxonomy.version));
@@ -810,7 +810,7 @@ fn labels_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace: 
                 let used = project.events().iter().filter(|e| e.label.as_ref() == Some(&label.id)).count();
                 let parent = taxonomy.labels.iter().any(|l| l.parent.as_ref() == Some(&label.id));
                 let tip = if used > 0 { format!("{used} events carry it") } else if parent { "Has subtypes".to_string() } else { "Remove".to_string() };
-                if ui.add_enabled(used == 0 && !parent, egui::Button::new("🗑").small()).on_hover_text(tip).clicked() {
+                if theme::danger(ui, used == 0 && !parent, egui::Button::new("🗑").small()).on_hover_text(tip).clicked() {
                     change = Some(("Remove label".to_string(), Change::RemoveLabel { label: label.id.clone() }));
                 }
                 ui.end_row();
@@ -847,7 +847,7 @@ fn labels_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace: 
                 windows.new_name.clear();
             }
             if let Some(problem) = problem.filter(|_| !windows.new_name.is_empty()) {
-                ui.colored_label(WARN_COLOR, problem);
+                ui.colored_label(theme::WARN, problem);
             }
         });
     });
@@ -875,7 +875,7 @@ fn export_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace: 
         return;
     }
     let mut open = true;
-    egui::Window::new("Export Dataset").open(&mut open).default_width(420.0).show(ctx, |ui| {
+    theme::tool_window(ctx, "Export Dataset").open(&mut open).default_width(420.0).show(ctx, |ui| {
         let project = &workspace.project;
         let labelled = project.events().iter().filter(|e| training_class(e).is_some()).count();
         let rejected = project.events().iter().filter(|e| e.status == EventStatus::Rejected).count();
@@ -914,7 +914,7 @@ fn export_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace: 
         let busy = windows.folder.is_some() || windows.export.is_some();
         ui.horizontal(|ui| {
             let n = if windows.include_unlabelled { project.events().len() } else { labelled };
-            if ui.add_enabled(n > 0 && !busy, egui::Button::new(format!("Export {n} events…"))).clicked() {
+            if ui.add_enabled(n > 0 && !busy, theme::primary(format!("Export {n} events…"))).clicked() {
                 windows.exported = None;
                 windows.folder = Some(IoTaskPool::get().spawn(async {
                     if let Some(path) = crate::tour::picked() {
@@ -935,7 +935,7 @@ fn export_window(ctx: &egui::Context, windows: &mut ClassifyWindows, workspace: 
                 ui.label(format!("Wrote {} events and {} members to {}: {}.", manifest.events, manifest.members, path.display(), classes.join(", ")));
             }
             Some(Err(error)) => {
-                ui.colored_label(WARN_COLOR, error);
+                ui.colored_label(theme::WARN, error);
             }
             None => {}
         }
