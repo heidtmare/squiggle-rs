@@ -1,9 +1,7 @@
 //! The demo waveform, and the command-line options that seed it.
 //!
-//! The Java project generated this shape in two places: the toolbar's *Add
-//! Squiggle* button, and `SquigglePlotExample`, which filled a plot with a
-//! hundred of them to see how the renderer coped. Both live here, the latter
-//! as a startup flag.
+//! The toolbar's *Add Squiggle* button uses this shape, and a startup flag
+//! fills a plot with many of them to stress the renderer.
 
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
@@ -14,7 +12,7 @@ use crate::plot::AddSquiggle;
 use crate::showcase::{self, LoadScene, Scene, Showcase};
 use crate::workspace::{SyntheticEvent, WorkspaceRequest};
 
-/// Samples per squiggle, as the Java toolbar used.
+/// Samples per squiggle added from the toolbar.
 pub const DEFAULT_SAMPLE_COUNT: usize = 1000;
 
 /// Horizontal spacing between samples, and the amplitude of the wave.

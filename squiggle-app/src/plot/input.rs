@@ -1,8 +1,7 @@
 //! Mouse handling: pan, zoom and pick.
 //!
-//! The Java control installed and removed JavaFX event handlers as its
-//! `controlsEnabled` property changed. Systems run unconditionally instead and
-//! check the flag, which keeps the wiring in one place.
+//! Systems run unconditionally and check `controls_enabled`, which keeps the
+//! wiring in one place.
 
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
@@ -11,16 +10,14 @@ use squiggle_core::Coord;
 
 use super::{Plot, SquiggleModel};
 
-/// Zoom applied per scroll notch. The original stepped the scale by a flat
-/// 0.05, which crawls when zoomed in and jumps when zoomed out; a constant
-/// ratio feels the same at every magnification.
+/// Zoom applied per scroll notch. A constant ratio feels the same at every
+/// magnification, where a flat step crawls when zoomed in and jumps when out.
 const ZOOM_PER_NOTCH: f64 = 1.1;
 
 /// Scroll reported in pixels, as trackpads do, divided into notches.
 const PIXELS_PER_NOTCH: f64 = 50.0;
 
-/// How far the pointer may travel before a click counts as a drag. This is the
-/// role JavaFX's `isStillSincePress` played.
+/// How far the pointer may travel before a click counts as a drag.
 const DRAG_SLOP: f64 = 3.0;
 
 /// How close a click must land to count as hitting a squiggle, in pixels.
@@ -116,7 +113,7 @@ pub fn pan(
 }
 
 /// Zooms about the cursor. Alt holds the x scale still and Control holds y,
-/// matching the original's modifiers.
+/// matching common plot-tool modifiers.
 pub fn zoom(
     mut plot: ResMut<Plot>,
     mut scrolls: MessageReader<MouseWheel>,

@@ -19,8 +19,7 @@ const LABEL_SIZE: f32 = 9.0;
 const LABEL_ADVANCE: f32 = 0.62;
 const POINT_RADIUS: f32 = 2.5;
 /// Selected points closer together than this on screen are not worth drawing
-/// individually; the line already shows where they are. The Java renderer made
-/// the same trade by averaging points that landed on one screen column.
+/// individually; the line already shows where they are.
 const POINT_SPACING: f64 = 6.0;
 /// Target spacing between labelled ticks on linear axes. Labels carry three
 /// decimals, so steps stop shrinking at 0.001.
@@ -98,7 +97,7 @@ fn draw_axis(plot: &Plot, axis: &Axis, gizmos: &mut Gizmos) {
 
                 if let Some(label) = tick.label {
                     let at = Coord::new(view.insets.left / 2.0, y);
-                    // Reading downwards, as the Java renderer's rotation did.
+                    // Reading downwards.
                     text(plot, gizmos, at, &label, Rot2::degrees(-90.0), color);
                 }
             }
@@ -106,8 +105,7 @@ fn draw_axis(plot: &Plot, axis: &Axis, gizmos: &mut Gizmos) {
     }
 }
 
-/// Marks the individual samples of selected squiggles, as the Java renderer
-/// did when a squiggle was picked.
+/// Marks the individual samples of selected squiggles.
 fn draw_selected_points(plot: &Plot, squiggles: &Query<&SquiggleModel>, gizmos: &mut Gizmos) {
     let view = &plot.view;
 
@@ -191,8 +189,7 @@ fn text(plot: &Plot, gizmos: &mut Gizmos, at: Coord, label: &str, rotation: Rot2
 }
 
 /// Draws a label over an opaque patch, so the cursor readout stays legible
-/// where it crosses an axis label. The Java renderer filled a black rectangle
-/// behind the text for the same reason.
+/// where it crosses an axis label.
 fn masked_text(
     plot: &Plot,
     gizmos: &mut Gizmos,

@@ -1,9 +1,7 @@
 //! The plot itself: the squiggles, the axes, and the camera that frames them.
 //!
-//! This is the port of the Java `SquigglePlot` control. There, one class held
-//! the canvas, the animation timer, the mouse handlers, the render loop and the
-//! model. Here the model lives in `squiggle-core`, each squiggle is an entity,
-//! and Bevy supplies the loop.
+//! The model lives in `squiggle-core`, each squiggle is an entity, and Bevy
+//! supplies the loop.
 
 pub mod input;
 pub mod line;
@@ -15,7 +13,7 @@ use squiggle_core::{Axis, Bounds, Coord, Insets, Orientation, PlotView, Rgba, Sq
 
 use line::SquiggleLineMaterial;
 
-/// Gutters reserved for the axes, matching the Java plot's insets.
+/// Gutters reserved for the axes.
 pub const AXIS_GUTTER: f64 = 20.5;
 /// Gutters in tracks mode: row labels on the left, time axis below.
 pub const TRACK_LABEL_WIDTH: f64 = 170.0;
@@ -31,7 +29,7 @@ const Z_GUTTER: f32 = -1.0;
 /// Hairline width for the axis and crosshair gizmos.
 pub const GIZMO_LINE_WIDTH: f32 = 1.0;
 
-/// How a selected squiggle is highlighted, as in the Java renderer.
+/// How a selected squiggle is highlighted.
 const SELECTED_COLOR: Rgba = Rgba::CYAN;
 const SELECTED_WIDTH_BONUS: f32 = 1.0;
 
@@ -136,8 +134,7 @@ pub struct FitToData;
 
 /// The plot's view state and display options.
 ///
-/// The Java control exposed these as JavaFX properties so the FXML could bind
-/// to them; a resource plays the same role here.
+/// Held as a resource so UI and input systems share it.
 #[derive(Resource)]
 pub struct Plot {
     pub name: String,
@@ -146,7 +143,7 @@ pub struct Plot {
     pub axes: Vec<Axis>,
     pub axes_visible: bool,
     pub crosshairs_visible: bool,
-    /// When off, the plot ignores drag, scroll and click, as in the original.
+    /// When off, the plot ignores drag, scroll and click.
     pub controls_enabled: bool,
     /// Cursor position in plot-local logical pixels, if it is over the plot.
     pub cursor: Option<Coord>,
@@ -203,7 +200,7 @@ impl Plot {
 }
 
 fn setup(mut commands: Commands, mut gizmo_config: ResMut<GizmoConfigStore>) {
-    // The Java axes and crosshairs were hairlines; gizmos default to two pixels.
+    // Axes and crosshairs are hairlines; gizmos default to two pixels.
     let (config, _) = gizmo_config.config_mut::<DefaultGizmoConfigGroup>();
     config.line.width = GIZMO_LINE_WIDTH;
 
@@ -213,7 +210,6 @@ fn setup(mut commands: Commands, mut gizmo_config: ResMut<GizmoConfigStore>) {
         PlotCamera,
         Camera2d,
         Camera { order: 0, ..default() },
-        // JavaFX painted the plot onto a black background.
         Msaa::Sample4,
     ));
 

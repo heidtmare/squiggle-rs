@@ -1,9 +1,7 @@
 //! The application chrome: menu bar, toolbar and squiggle sidebar.
 //!
-//! The Java version described this layout in FXML, with a custom `Sidebar`
-//! control whose rotated handles toggled a content pane. egui expresses the
-//! same arrangement directly, and the sidebar's squiggle list -- an empty
-//! placeholder pane in the original -- is filled in here.
+//! The sidebar is a rotated handle that toggles a content pane listing the
+//! plot's squiggles.
 
 use bevy::camera::{CameraOutputMode, Viewport, visibility::RenderLayers};
 use bevy::ecs::system::SystemParam;
@@ -291,7 +289,7 @@ fn chrome(
         .show_separator_line(false)
         .frame(egui::Frame::side_top_panel(root.style()).inner_margin(egui::Margin::symmetric(3, 6)))
         .show(&mut root, |ui| {
-            // The Java sidebar stacked rotated toggle buttons down its edge.
+            // Rotated toggle buttons stacked down the edge.
             sidebar_handle(ui, &mut chrome.sidebar_open, "Squiggles")
                 .on_hover_text("Show the squiggles in this plot");
         })
@@ -991,7 +989,6 @@ fn about_window(ctx: &egui::Context, chrome: &mut Chrome) {
         .show(ctx, |ui| {
             ui.set_max_width(520.0);
             ui.label("Squiggle — a waveform plot.");
-            ui.label("A Rust and Bevy port of the original JavaFX application.");
             ui.separator();
             ui.label("Process ▸ Filter and detrend preprocesses selected tracks; Process ▸ Align measures and applies delays.");
             ui.label("Process ▸ Pick finds onsets; Process ▸ Locate fits source position and origin time, and removes moveout.");
@@ -1113,8 +1110,7 @@ fn swatch(ui: &mut egui::Ui, color: Rgba) {
     ui.painter().rect_filled(rect, egui::CornerRadius::same(2), theme::color32(color));
 }
 
-/// A toggle whose label reads up a narrow strip, standing in for the rotated
-/// handle of the Java sidebar.
+/// A toggle whose label reads up a narrow strip: the sidebar's rotated handle.
 fn sidebar_handle(ui: &mut egui::Ui, open: &mut bool, text: &str) -> egui::Response {
     const PADDING: f32 = 12.0;
     let galley = ui.painter().layout_no_wrap(text.to_string(), egui::FontId::proportional(13.0), egui::Color32::PLACEHOLDER);

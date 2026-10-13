@@ -1,8 +1,6 @@
 //! Axis definitions and tick generation.
 //!
-//! The Java original repeated a near-identical tick loop in each of its four
-//! axis classes. Here a single generator drives every axis, and the axis only
-//! decides where its ticks sit and what they are called.
+//! A single generator drives every axis; the axis only decides where its ticks sit and what they are called.
 
 use crate::view::PlotView;
 
@@ -44,9 +42,7 @@ pub enum AxisKind {
     /// Equal pixel steps carry equal value steps.
     Linear,
     /// Equal pixel steps carry equal *multiples*: each major step is one
-    /// decade of `base`. This completes what the Java `Logrithmic*Axis`
-    /// classes started; there the minor ticks were left as a TODO and the
-    /// vertical variant never applied a log scale at all.
+    /// decade of `base`, subdivided by minor ticks.
     Logarithmic { base: f64 },
 }
 
@@ -94,7 +90,7 @@ pub struct Axis {
 }
 
 impl Axis {
-    /// A linear axis with the Java defaults: major every 100 units, minor
+    /// A linear axis with the defaults: major every 100 units, minor
     /// every 10, anchored to the data.
     pub fn linear(name: impl Into<String>, orientation: Orientation) -> Self {
         Self {
@@ -273,8 +269,8 @@ impl Span {
     }
 
     /// Steps forward from `start` until past `max`, reporting positions that
-    /// fall inside the span. Positions before `min` are stepped over, matching
-    /// the original's behaviour when the origin sits off the left of the plot.
+    /// fall inside the span. Positions before `min` are stepped over, so an
+    /// origin off the left of the plot still yields aligned ticks.
     fn walk_up(&self, start: f64, step: f64, budget: usize, visit: &mut impl FnMut(f64)) {
         let mut position = start;
         let mut emitted = 0;
@@ -300,7 +296,7 @@ impl Span {
     }
 }
 
-/// Formats a tick value like the Java `DecimalFormat("#.###")`: at most three
+/// Formats a tick value like the pattern `#.###`: at most three
 /// decimals, no trailing zeros, and no lone minus sign on a rounded-away value.
 pub fn format_value(value: f64) -> String {
     if !value.is_finite() {
@@ -430,11 +426,11 @@ mod tests {
             .with_anchor(Anchor::Screen)
             .with_steps(100.0, 100.0);
         let ticks = axis.ticks(&view());
-        assert!(ticks.iter().any(|t| !t.is_major()), "the Java version never drew these");
+        assert!(ticks.iter().any(|t| !t.is_major()), "minor ticks subdivide each decade");
     }
 
     #[test]
-    fn values_format_like_the_java_decimal_pattern() {
+    fn values_format_like_the_decimal_pattern() {
         assert_eq!(format_value(0.0), "0");
         assert_eq!(format_value(-0.0), "0");
         assert_eq!(format_value(100.0), "100");

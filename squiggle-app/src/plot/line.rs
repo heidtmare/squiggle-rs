@@ -1,7 +1,6 @@
 //! Turning a squiggle's points into GPU geometry.
 //!
-//! The Java renderer walked every coordinate on the CPU each frame, projecting
-//! and culling as it went. Here the points are uploaded once as a mesh and the
+//! The points are uploaded once as a mesh and the
 //! projection happens in the vertex shader, so panning and zooming cost nothing
 //! per point.
 
