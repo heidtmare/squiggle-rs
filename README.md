@@ -1,7 +1,12 @@
+![Squiggle](docs/media/squiggle-banner.jpg)
+
 # Squiggle
 
-An interactive waveform plotter built on [Bevy](https://bevy.org). Pan, zoom
-and pick your way around hundreds of high-density polylines at once, then run
+An interactive waveform plotter and event-analysis tool built on
+[Bevy](https://bevy.org), with machine learning at its core: detect events
+across sensors, then classify them with models trained offline in Rust
+(classical classifiers and multi-phenomenology CNNs) running as a weighted
+ensemble. Pan and zoom hundreds of high-density polylines at once, and run
 them through Fourier and wavelet transforms without leaving the plot.
 
 [![Squiggle showcase: click for the full video](docs/media/showcase.gif)](docs/media/showcase.mp4)
@@ -16,11 +21,11 @@ them through Fourier and wavelet transforms without leaving the plot.
 - [Projects](#projects)
 - [Processing and alignment](#processing-and-alignment)
   - [Alignment](#alignment)
-- [Picking and location](#picking-and-location)
 - [Events](#events)
 - [Classification](#classification)
-- [Models](#models)
+- [Machine learning](#machine-learning)
 - [Templates and clusters](#templates-and-clusters)
+- [Arrivals and location](#arrivals-and-location)
 - [Live feeds](#live-feeds)
 - [Shared projects](#shared-projects)
 - [Transforms](#transforms)
@@ -28,11 +33,35 @@ them through Fourier and wavelet transforms without leaving the plot.
 - [How it works](#how-it-works)
   - [Layout](#layout)
   - [Rendering](#rendering)
-  - [Picking](#picking)
+  - [Hit-testing](#hit-testing)
 - [Testing](#testing)
 
 ## Features
 
+- **Machine learning.** `squiggle-train` fits logistic regression, linear SVM,
+  kNN, a decision tree or a random forest to exported features, or a CNN
+  (burn) to exported waveform windows with one branch per phenomenology and
+  late or early fusion, and writes a checksummed model package; ONNX models
+  can be packaged too. The app imports packages and runs inference only,
+  recording each model's prediction on every event and combining them in a
+  weighted ensemble.
+- **Classification.** Per-member and per-event features (time domain,
+  spectral, wavelet, across sensors) and earthquake/explosion discriminants
+  (P/S ratio, spectral ratio, first motion, depth, coupled air and EM
+  arrivals); a transparent rules classifier; an extensible label taxonomy
+  seeded with earthquake, explosion and other; a review queue ordered by
+  uncertainty and model disagreement; training datasets exported as Parquet.
+- **Events.** Streaming detectors (STA/LTA, energy, kurtosis) on every track,
+  association across sensors with coincidence windows from each
+  phenomenology's propagation, located and outlier-pruned; a catalogue to
+  review, accept, reject, split and merge; events brushed by hand. Each event
+  carries its own members, offsets, picks and origin.
+- **Similarity and clusters.** A template library curated by analysts:
+  events match templates by network cross-correlation, which votes their
+  labels, and a matched filter finds weak repeats. An offline PCA and DBSCAN
+  embedding, imported like a model, plots events in a scatter view where a
+  lasso labels a cluster in one step. Analyst agreement is tracked per model
+  version.
 - **Fast at scale.** Samples are uploaded to the GPU once and projected in a
   vertex shader, so panning and zooming cost nothing per point. A hundred
   squiggles of ten thousand samples each stay smooth.
@@ -48,29 +77,6 @@ them through Fourier and wavelet transforms without leaving the plot.
   rates, reconciled across all pairs by least squares, reviewed before
   applying. Manual shifts by drag (snapping to correlation peaks) or by
   sample. Every edit undoes.
-- **Picking and location.** STA/LTA onsets refined by AIC, manual picks by
-  key, and a grid-search locator over position, depth and origin time that
-  mixes phenomenologies (EMP anchors the origin, slower phases resolve
-  position). Moveout removal and pick alignment line up arrivals across
-  phenomenologies.
-- **Events.** Streaming detectors (STA/LTA, energy, kurtosis) on every track,
-  association across sensors with coincidence windows from each
-  phenomenology's propagation, located and outlier-pruned; a catalogue to
-  review, accept, reject, split and merge; events brushed by hand. Each event
-  carries its own members, offsets, picks and origin.
-- **Classification.** Per-member and per-event features (time domain,
-  spectral, wavelet, across sensors) and earthquake/explosion discriminants
-  (P/S ratio, spectral ratio, first motion, depth, coupled air and EM
-  arrivals); a transparent rules classifier; an extensible label taxonomy
-  seeded with earthquake, explosion and other; a review queue ordered by
-  uncertainty and model disagreement; training datasets exported as Parquet.
-- **Offline models.** `squiggle-train` fits logistic regression, linear SVM,
-  kNN, a decision tree or a random forest to exported features, or a CNN
-  (burn) to exported waveform windows with one branch per phenomenology and
-  late or early fusion, and writes a checksummed model package; ONNX models
-  can be packaged too. The app imports packages and runs inference only,
-  recording each model's prediction on every event and combining them in a
-  weighted ensemble.
 - **Live feeds.** A framed TCP stream (`heidtmare.squiggle.stream/1`) is
   recorded to disk as it arrives, plotted as it grows (level of detail
   appended, never rebuilt), followed at the right edge, and detected on a
@@ -82,19 +88,17 @@ them through Fourier and wavelet transforms without leaving the plot.
   edits both ways; edits merge per field, the later one winning, except where
   an analyst's judgement (a locked alignment, a manual pick, a reviewed event)
   meets a concurrent edit, which is held as a conflict for a person to settle.
-- **Similarity and clusters.** A template library curated by analysts:
-  events match templates by network cross-correlation, which votes their
-  labels, and a matched filter finds weak repeats. An offline PCA and DBSCAN
-  embedding, imported like a model, plots events in a scatter view where a
-  lasso labels a cluster in one step. Analyst agreement is tracked per model
-  version.
+- **Location.** A grid-search locator over position, depth and origin time
+  that mixes phenomenologies (EMP anchors the origin, slower phases resolve
+  position), from automatic or manual arrivals. Moveout removal lines up
+  arrivals across phenomenologies.
 - **Spectrogram strips** per row, two-sided for I/Q.
 - **Independent axis zoom.** Zoom x and y together or separately, anchored on
   the point under the cursor — waveform axes rarely share a unit.
 - **Even strokes at any zoom.** Lines are widened in screen space after
   projection, so they keep the same thickness however the axes are stretched.
 - **Linear and logarithmic axes**, with ticks and labels that follow the view.
-- **Exact picking.** Click a line to select it and see its individual samples.
+- **Exact selection.** Click a line to select it and see its individual samples.
 - **Signal transforms.** Fourier, DFT, FFT, STFT, inverse Fourier and wavelet
   decompositions, with the results plotted alongside the source.
 - **Self-checking demos** that run each transform on a signal with a known
@@ -120,10 +124,10 @@ already compiles dependencies with optimizations in dev profiles.
 | --- | --- |
 | `--project FILE` | Open a `.squiggle` project |
 | `--synthetic` | Start with a synthetic event of known delays (see [Alignment](#alignment)) |
-| `--located` | Start with a synthetic EMP, seismic and infrasound event of known source (see [Picking and location](#picking-and-location)) |
+| `--located` | Start with a synthetic EMP, seismic and infrasound event of known source (see [Arrivals and location](#arrivals-and-location)) |
 | `--swarm` | Start with two minutes of synthetic seismic data holding six events and glitches (see [Events](#events)) |
 | `--mixed` | Start with seven minutes of synthetic earthquakes and explosions on seismic and infrasound sensors (see [Classification](#classification)) |
-| `--catalogue` | Start with 27 minutes of 40 varied synthetic earthquakes and explosions on the same sensors, for training (see [Models](#models)) |
+| `--catalogue` | Start with 27 minutes of 40 varied synthetic earthquakes and explosions on the same sensors, for training (see [Machine learning](#machine-learning)) |
 | `--families` | Start with 16 minutes of repeats from two quarries and two earthquake swarms, one weak repeat each (see [Templates and clusters](#templates-and-clusters)) |
 | `--live HOST:PORT` | Connect to a live feed (see [Live feeds](#live-feeds)) |
 | `--live-demo` | Start with the event families replayed live at ×10 |
@@ -295,67 +299,6 @@ recording one event with known delays under a strong microseism. Align then
 shows a *vs truth* column. Unfiltered, the microseism dominates and rows stay
 unchecked; after a 1–15 Hz band-pass, delays land within 1.5 ms of truth.
 
-## Picking and location
-
-A pick marks an arrival on a trace: a phase from its phenomenology's
-propagation (`P`, `S`, … or an unnamed onset for a constant speed), a time on
-the trace's own clock (so it moves with clock corrections and offsets), an
-uncertainty and provenance. One per trace and phase. Manual picks lock: an
-automatic re-pick never replaces them.
-
-**Process ▸ Pick…** picks the selected tracks' plotted series (complex traces
-by magnitude), with STA/LTA windows and thresholds per phenomenology:
-
-1. Classic (short window over the long window before it) or recursive
-   STA/LTA on energy; a trigger runs from the *on* ratio until it falls below
-   *off*.
-2. The first (or strongest) trigger is refined by the Akaike information
-   criterion over a window from four STAs before it to one after; the AIC
-   minimum is the onset, and the half-width of its basin within 2 of the
-   minimum is the uncertainty (at least half a sample).
-
-Defaults: seismic 0.3/5 s, infrasound 0.2/3 s, acoustic 0.01/0.5 s, EMP and
-RF 10 µs/1 ms; other phenomenologies 20/400 samples. Results are reviewed,
-then applied as automatic picks of the first phase. Hover a row and press `P`
-or `S` for a manual pick at the cursor (uncertainty: a pixel, at least a
-sample).
-
-**Process ▸ Locate…** uses every included pick whose sensor has a location
-and whose phase has a speed:
-
-- Travel time is a straight ray at the phase speed: great-circle surface
-  distance (spherical Earth) combined with source depth plus sensor elevation.
-  Valid at regional distances.
-- A 41×41 grid over latitude and longitude (±2× the sensor spread, at least
-  10 km) and 11 depths (0 to the depth limit; 0 fixes the source at the
-  surface) is refined eight times around the best node.
-- At each node the origin time is solved in closed form, weighting each pick
-  by `1/σ²`; χ² is the misfit. Precise EMP and RF picks therefore anchor the
-  origin time, and slower phases resolve position.
-
-The result shows position, depth, origin, RMS, χ²/dof, per-pick residuals and
-a map of the first grid's misfit with sensors (white outline: used),
-solution and, for synthetic data, truth. **Save origin** stores it (one per
-project until events exist); rows then show predicted arrivals, can be
-ordered by distance, and Shift+drag snaps to them.
-
-**Align across phenomenologies** (in the Locate window):
-
-- **Remove moveout** shifts every placed trace by minus its first-phase travel
-  time from the saved origin, so arrivals of every phenomenology line up at
-  the origin time.
-- **Align picks to ★ reference** shifts selected tracks so their pick sits on
-  the reference's pick of the same phase.
-
-Both are undoable, automatic and leave locked offsets alone.
-
-`--located` (or the **Synthetic located event** demo) writes twelve SAC files
-with station coordinates: three EMP sensors (1 MHz, 20 ms captures), six
-seismic stations (50–200 Hz, P and S) and three infrasound sensors (50 Hz)
-recording a 0.5 km deep explosion. Arrivals follow the built-in speeds. With
-default settings every pick lands within a sample of truth, and the location
-is within 3 m, depth 17 m and origin time 1 µs.
-
 ## Events
 
 An event is a window (clock-corrected time) over member traces. Each member
@@ -477,7 +420,7 @@ high-frequency compressional P, weak S, an infrasound arrival). Detect with
 defaults finds all ten, explosions with their infrasound; Classify labels all
 ten correctly at 95 %.
 
-## Models
+## Machine learning
 
 Training is offline, in Rust, outside the app:
 
@@ -607,6 +550,67 @@ weak swarm repeats, located within 5 ms RMS; Classify votes every repeat's
 family from its templates (one weak quarry abstains). Label the events,
 export, and `squiggle-train cluster` finds the four families (adjusted Rand
 index 0.89, the two weak quarry repeats unclustered).
+
+## Arrivals and location
+
+A pick marks an arrival on a trace: a phase from its phenomenology's
+propagation (`P`, `S`, … or an unnamed onset for a constant speed), a time on
+the trace's own clock (so it moves with clock corrections and offsets), an
+uncertainty and provenance. One per trace and phase. Manual picks lock: an
+automatic re-pick never replaces them.
+
+**Process ▸ Pick…** picks the selected tracks' plotted series (complex traces
+by magnitude), with STA/LTA windows and thresholds per phenomenology:
+
+1. Classic (short window over the long window before it) or recursive
+   STA/LTA on energy; a trigger runs from the *on* ratio until it falls below
+   *off*.
+2. The first (or strongest) trigger is refined by the Akaike information
+   criterion over a window from four STAs before it to one after; the AIC
+   minimum is the onset, and the half-width of its basin within 2 of the
+   minimum is the uncertainty (at least half a sample).
+
+Defaults: seismic 0.3/5 s, infrasound 0.2/3 s, acoustic 0.01/0.5 s, EMP and
+RF 10 µs/1 ms; other phenomenologies 20/400 samples. Results are reviewed,
+then applied as automatic picks of the first phase. Hover a row and press `P`
+or `S` for a manual pick at the cursor (uncertainty: a pixel, at least a
+sample).
+
+**Process ▸ Locate…** uses every included pick whose sensor has a location
+and whose phase has a speed:
+
+- Travel time is a straight ray at the phase speed: great-circle surface
+  distance (spherical Earth) combined with source depth plus sensor elevation.
+  Valid at regional distances.
+- A 41×41 grid over latitude and longitude (±2× the sensor spread, at least
+  10 km) and 11 depths (0 to the depth limit; 0 fixes the source at the
+  surface) is refined eight times around the best node.
+- At each node the origin time is solved in closed form, weighting each pick
+  by `1/σ²`; χ² is the misfit. Precise EMP and RF picks therefore anchor the
+  origin time, and slower phases resolve position.
+
+The result shows position, depth, origin, RMS, χ²/dof, per-pick residuals and
+a map of the first grid's misfit with sensors (white outline: used),
+solution and, for synthetic data, truth. **Save origin** stores it (one per
+project until events exist); rows then show predicted arrivals, can be
+ordered by distance, and Shift+drag snaps to them.
+
+**Align across phenomenologies** (in the Locate window):
+
+- **Remove moveout** shifts every placed trace by minus its first-phase travel
+  time from the saved origin, so arrivals of every phenomenology line up at
+  the origin time.
+- **Align picks to ★ reference** shifts selected tracks so their pick sits on
+  the reference's pick of the same phase.
+
+Both are undoable, automatic and leave locked offsets alone.
+
+`--located` (or the **Synthetic located event** demo) writes twelve SAC files
+with station coordinates: three EMP sensors (1 MHz, 20 ms captures), six
+seismic stations (50–200 Hz, P and S) and three infrasound sensors (50 Hz)
+recording a 0.5 km deep explosion. Arrivals follow the built-in speeds. With
+default settings every pick lands within a sample of truth, and the location
+is within 3 m, depth 17 m and origin time 1 µs.
 
 ## Live feeds
 
@@ -794,7 +798,7 @@ Axes, crosshairs and the dots on a selected squiggle are drawn with gizmos:
 there are never more than a few hundred of them and they change every frame,
 which is the opposite trade from the squiggles themselves.
 
-### Picking
+### Hit-testing
 
 A click measures the distance to each line segment, after rejecting squiggles
 by their screen-space bounding box. There is no second render pass and no GPU
